@@ -60,7 +60,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "S", "B", "I"]
-ignore = ["S101", "S105", "S110", "S112", "E501", "B007", "B904", "B905", "E741", "F841"]
+ignore = ["S101", "S105", "S110", "S112", "E501", "B007", "B904", "B905", "E741", "F841", "S310"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

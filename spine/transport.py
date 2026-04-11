@@ -63,9 +63,11 @@ class CircuitBreaker:
 
 class ServerConnection:
     """
-    Manages a single downstream MCP server subprocess.
+    Manages a single downstream MCP server.
 
-    Handles startup, communication, and graceful shutdown.
+    Supports two transports:
+      - stdio: local subprocess with stdin/stdout pipes
+      - sse: remote HTTP/SSE server
     """
 
     def __init__(self, config: ServerConfig, logger: AuditLogger):
@@ -83,9 +85,13 @@ class ServerConnection:
         self._request_id: int = 0
         self._pending: dict[int, asyncio.Future] = {}
         self._reader_task: asyncio.Task | None = None
+        self._sse_client = None  # SSEClient instance for SSE transport
+        self._is_sse = config.transport == "sse"
 
     @property
     def is_available(self) -> bool:
+        if self._is_sse:
+            return self._sse_client is not None and self._sse_client.is_connected
         return (
             self._process is not None
             and self._process.returncode is None
@@ -93,6 +99,41 @@ class ServerConnection:
         )
 
     async def start(self) -> None:
+        """Start the server connection (stdio subprocess or SSE client)."""
+        if self._is_sse:
+            await self._start_sse()
+        else:
+            await self._start_stdio()
+
+    async def _start_sse(self) -> None:
+        """Connect to a remote SSE MCP server."""
+        self._logger.info(
+            EventType.SERVER_CONNECT,
+            server_name=self.name,
+            transport="sse",
+            url=self.config.url,
+        )
+
+        from spine.sse_client import SSEClient
+
+        self._sse_client = SSEClient(
+            url=self.config.url,
+            headers=self.config.headers,
+            timeout=self.config.timeout_seconds,
+            logger=self._logger,
+        )
+
+        try:
+            await self._sse_client.connect()
+        except Exception as e:
+            self._logger.error(
+                EventType.SERVER_CONNECT,
+                server_name=self.name,
+                error=f"SSE connection failed: {e}",
+            )
+            raise
+
+    async def _start_stdio(self) -> None:
         """Spawn the downstream server subprocess."""
         self._logger.info(
             EventType.SERVER_CONNECT,
@@ -180,6 +221,16 @@ class ServerConnection:
                 f"(circuit: {'open' if self._circuit.is_open else 'closed'})"
             )
 
+        # Route through SSE client if using SSE transport
+        if self._is_sse:
+            try:
+                result = await self._sse_client.send_request(method, params)
+                self._circuit.record_success()
+                return result
+            except Exception:
+                self._circuit.record_failure()
+                raise
+
         self._request_id += 1
         req_id = self._request_id
 
@@ -215,7 +266,7 @@ class ServerConnection:
                 error=f"Timeout after {self.config.timeout_seconds}s",
             )
             raise
-        except Exception:
+        except Exception as e:
             self._circuit.record_failure()
             raise
         finally:
@@ -278,6 +329,11 @@ class ServerConnection:
     async def shutdown(self) -> None:
         """Gracefully shut down the server connection."""
         self._logger.info(EventType.SERVER_DISCONNECT, server_name=self.name)
+
+        if self._is_sse:
+            if self._sse_client:
+                await self._sse_client.close()
+            return
 
         if self._reader_task:
             self._reader_task.cancel()

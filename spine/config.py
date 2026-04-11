@@ -29,21 +29,35 @@ else:
 class ServerConfig:
     """Configuration for a single downstream MCP server."""
     name: str
-    command: str
+    command: str = ""
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     timeout_seconds: float = 30.0
     max_retries: int = 2
     circuit_breaker_threshold: int = 3
     enabled: bool = True
+    transport: str = "stdio"          # "stdio" or "sse"
+    url: str = ""                     # SSE endpoint URL
+    headers: dict[str, str] = field(default_factory=dict)  # SSE auth headers
 
     def validate(self, allowed_commands: frozenset[str]) -> list[str]:
         """Validate this server config. Returns list of warnings."""
         warnings = []
-        try:
-            validate_server_command(self.command, self.args, allowed_commands)
-        except Exception as e:
-            raise ValueError(f"Server '{self.name}': {e}") from e
+
+        if self.transport == "sse":
+            # SSE servers need a URL, not a command
+            if not self.url:
+                raise ValueError(f"Server '{self.name}': SSE transport requires 'url'")
+            if not self.url.startswith(("http://", "https://")):
+                raise ValueError(f"Server '{self.name}': SSE url must start with http:// or https://")
+        else:
+            # stdio servers need a valid command
+            if not self.command:
+                raise ValueError(f"Server '{self.name}': stdio transport requires 'command'")
+            try:
+                validate_server_command(self.command, self.args, allowed_commands)
+            except Exception as e:
+                raise ValueError(f"Server '{self.name}': {e}") from e
 
         if self.timeout_seconds <= 0:
             raise ValueError(f"Server '{self.name}': timeout must be positive")
@@ -161,13 +175,16 @@ def parse_config(raw: dict[str, Any]) -> SpineConfig:
 
         servers.append(ServerConfig(
             name=srv["name"],
-            command=srv["command"],
+            command=srv.get("command", ""),
             args=srv.get("args", []),
             env=env,
             timeout_seconds=srv.get("timeout_seconds", 30.0),
             max_retries=srv.get("max_retries", 2),
             circuit_breaker_threshold=srv.get("circuit_breaker_threshold", 3),
             enabled=srv.get("enabled", True),
+            transport=srv.get("transport", "stdio"),
+            url=srv.get("url", ""),
+            headers=srv.get("headers", {}),
         ))
 
     # Parse routing
