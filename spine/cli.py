@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 
 import click
@@ -303,6 +304,219 @@ def dashboard(db: str, refresh: float) -> None:
 
     dash = SpineDashboard(db_path=db, refresh_rate=refresh)
     dash.run()
+
+
+@main.command()
+@click.option("--db", default="spine_audit.db", help="Audit database path")
+@click.option("--hours", "-h", default=24, type=int, help="Analyze last N hours")
+@click.option("--json-output", is_flag=True, help="Output as JSON")
+def analytics(db: str, hours: int, json_output: bool) -> None:
+    """Show tool usage analytics and performance metrics."""
+    import sqlite3
+    import datetime as dt
+
+    db_path = Path(db)
+    if not db_path.exists():
+        console.print(f"[red]Audit database not found: {db}[/red]")
+        sys.exit(1)
+
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    cutoff = time.time() - (hours * 3600)
+
+    def query(sql, params=()):
+        try:
+            return [dict(r) for r in conn.execute(sql, params).fetchall()]
+        except sqlite3.Error:
+            return []
+
+    # ── Tool usage ranking ──
+    tool_usage = query("""
+        SELECT tool_name, COUNT(*) as calls,
+               ROUND(AVG(CAST(json_extract(details, '$.duration_ms') AS REAL)), 1) as avg_ms,
+               ROUND(MIN(CAST(json_extract(details, '$.duration_ms') AS REAL)), 1) as min_ms,
+               ROUND(MAX(CAST(json_extract(details, '$.duration_ms') AS REAL)), 1) as max_ms
+        FROM audit_log
+        WHERE event_type = 'tool_call'
+          AND tool_name IS NOT NULL
+          AND timestamp > ?
+        GROUP BY tool_name
+        ORDER BY calls DESC
+    """, (cutoff,))
+
+    # ── Total stats ──
+    totals = query("""
+        SELECT COUNT(*) as total_calls,
+               ROUND(AVG(CAST(json_extract(details, '$.duration_ms') AS REAL)), 1) as avg_ms
+        FROM audit_log
+        WHERE event_type = 'tool_call' AND timestamp > ?
+    """, (cutoff,))
+    total = totals[0] if totals else {"total_calls": 0, "avg_ms": 0}
+
+    # ── Security event breakdown ──
+    sec_events = query("""
+        SELECT event_type, COUNT(*) as cnt
+        FROM audit_log
+        WHERE event_type IN (
+            'rate_limited', 'path_violation', 'secret_detected',
+            'validation_error', 'policy_deny'
+        ) AND timestamp > ?
+        GROUP BY event_type
+        ORDER BY cnt DESC
+    """, (cutoff,))
+
+    # ── Hourly activity ──
+    hourly = query("""
+        SELECT CAST((timestamp - ?) / 3600 AS INTEGER) as hour_offset,
+               COUNT(*) as calls
+        FROM audit_log
+        WHERE event_type = 'tool_call' AND timestamp > ?
+        GROUP BY hour_offset
+        ORDER BY hour_offset
+    """, (cutoff, cutoff))
+
+    # ── HITL stats ──
+    hitl = query("""
+        SELECT
+            SUM(CASE WHEN json_extract(details, '$.action') = 'confirmed' THEN 1 ELSE 0 END) as confirmed,
+            SUM(CASE WHEN json_extract(details, '$.action') = 'denied' THEN 1 ELSE 0 END) as denied
+        FROM audit_log
+        WHERE event_type = 'tool_call'
+          AND json_extract(details, '$.confirmation_id') IS NOT NULL
+          AND timestamp > ?
+    """, (cutoff,))
+    hitl_stats = hitl[0] if hitl else {"confirmed": 0, "denied": 0}
+
+    # ── Busiest period ──
+    busiest = query("""
+        SELECT datetime(timestamp, 'unixepoch', 'localtime') as ts, COUNT(*) as cnt
+        FROM audit_log
+        WHERE event_type = 'tool_call' AND timestamp > ?
+        GROUP BY CAST(timestamp / 300 AS INTEGER)
+        ORDER BY cnt DESC
+        LIMIT 1
+    """, (cutoff,))
+
+    conn.close()
+
+    import time as _time
+
+    if json_output:
+        result = {
+            "period_hours": hours,
+            "total_calls": total["total_calls"],
+            "avg_latency_ms": total["avg_ms"],
+            "tools": tool_usage,
+            "security_events": sec_events,
+            "hitl": hitl_stats,
+            "hourly_activity": hourly,
+        }
+        console.print(json.dumps(result, indent=2))
+        return
+
+    # ── Render tables ──
+    console.print()
+    console.print(
+        Panel(
+            f"[bold cyan]MCP Spine Analytics[/bold cyan]  ·  Last {hours} hours",
+            style="cyan",
+        )
+    )
+
+    # Summary
+    summary = Table(show_header=False, expand=True, box=None)
+    summary.add_column(ratio=1)
+    summary.add_column(ratio=1)
+    summary.add_column(ratio=1)
+    summary.add_column(ratio=1)
+    summary.add_row(
+        f"[dim]Total Calls:[/dim] [bold]{total['total_calls']}[/bold]",
+        f"[dim]Avg Latency:[/dim] [bold]{total['avg_ms'] or 0:.0f}ms[/bold]",
+        f"[dim]Security Events:[/dim] [bold]{sum(e['cnt'] for e in sec_events)}[/bold]",
+        f"[dim]HITL:[/dim] [bold]{hitl_stats.get('confirmed') or 0} confirmed, {hitl_stats.get('denied') or 0} denied[/bold]",
+    )
+    console.print(summary)
+    console.print()
+
+    # Tool usage table
+    if tool_usage:
+        t = Table(title="Tool Usage Ranking", expand=True)
+        t.add_column("#", style="dim", width=3)
+        t.add_column("Tool", style="cyan", ratio=3)
+        t.add_column("Calls", justify="right", ratio=1)
+        t.add_column("Avg", justify="right", ratio=1)
+        t.add_column("Min", justify="right", ratio=1)
+        t.add_column("Max", justify="right", ratio=1)
+        t.add_column("Bar", ratio=3)
+
+        max_calls = max(tu["calls"] for tu in tool_usage) if tool_usage else 1
+        for i, tu in enumerate(tool_usage, 1):
+            bar_width = int((tu["calls"] / max_calls) * 20)
+            bar = "█" * bar_width + "░" * (20 - bar_width)
+
+            avg_style = "green" if (tu["avg_ms"] or 0) < 200 else "yellow" if (tu["avg_ms"] or 0) < 1000 else "red"
+
+            t.add_row(
+                str(i),
+                tu["tool_name"],
+                str(tu["calls"]),
+                f"[{avg_style}]{tu['avg_ms'] or 0:.0f}ms[/{avg_style}]",
+                f"{tu['min_ms'] or 0:.0f}ms",
+                f"{tu['max_ms'] or 0:.0f}ms",
+                f"[cyan]{bar}[/cyan]",
+            )
+        console.print(t)
+    else:
+        console.print("[dim]No tool calls in this period.[/dim]")
+
+    # Security events
+    if sec_events:
+        console.print()
+        s = Table(title="Security Events", expand=True)
+        s.add_column("Event Type", style="red", ratio=2)
+        s.add_column("Count", justify="right", ratio=1)
+        s.add_column("Bar", ratio=3)
+
+        max_sec = max(e["cnt"] for e in sec_events) if sec_events else 1
+        for e in sec_events:
+            bar_width = int((e["cnt"] / max_sec) * 20)
+            bar = "█" * bar_width + "░" * (20 - bar_width)
+            s.add_row(
+                e["event_type"].replace("_", " ").title(),
+                str(e["cnt"]),
+                f"[red]{bar}[/red]",
+            )
+        console.print(s)
+
+    # Hourly activity sparkline
+    if hourly:
+        console.print()
+        h = Table(title=f"Hourly Activity (last {hours}h)", expand=True)
+        h.add_column("Hour", style="dim", ratio=1)
+        h.add_column("Calls", justify="right", ratio=1)
+        h.add_column("Activity", ratio=4)
+
+        max_hourly = max(hr["calls"] for hr in hourly) if hourly else 1
+        for hr in hourly:
+            bar_width = int((hr["calls"] / max_hourly) * 30)
+            bar = "▓" * bar_width
+            hours_ago = hours - hr["hour_offset"]
+            h.add_row(
+                f"{hours_ago}h ago",
+                str(hr["calls"]),
+                f"[green]{bar}[/green]",
+            )
+        console.print(h)
+
+    # Busiest period
+    if busiest:
+        console.print()
+        console.print(
+            f"[dim]Busiest 5-min window:[/dim] {busiest[0]['ts']} "
+            f"({busiest[0]['cnt']} calls)"
+        )
+
+    console.print()
 
 
 if __name__ == "__main__":
