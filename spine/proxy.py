@@ -113,7 +113,7 @@ class SpineProxy:
             )
 
     async def start(self) -> None:
-        """Start the proxy: connect to all servers, then enter the main loop."""
+        """Start the proxy: enter message loop immediately, init servers in background."""
         self.logger.info(
             EventType.STARTUP,
             version="0.1.0",
@@ -122,29 +122,19 @@ class SpineProxy:
             security_audit=self.config.security.audit_all_tool_calls,
         )
 
-        # Connect to downstream servers
-        await self.pool.start_all()
+        # Enter main proxy loop FIRST — respond to initialize immediately.
+        # Heavy initialization (server connections, ML model loading)
+        # happens in the background so we don't miss Claude's handshake.
+        self._running = True
+        self._ready = False  # True once servers are connected
 
-        # Stage 2: Index all tool schemas for semantic routing
-        if self._router:
-            all_tools = self.pool.all_tools()
-            try:
-                self._router.index_tools(all_tools)
-                self.logger.info(
-                    EventType.STARTUP,
-                    component="router",
-                    indexed=self._router.indexed_count,
-                )
-            except ImportError:
-                self.logger.warn(
-                    EventType.STARTUP,
-                    component="router",
-                    message="ML deps not installed, semantic routing disabled. "
-                            "Install with: pip install mcp-spine[ml]",
-                )
-                self._router = None
+        # Start background initialization
+        asyncio.create_task(
+            self._background_init(),
+            name="spine-init",
+        )
 
-        # Stage 4: Start file watcher in background
+        # Start file watcher in background
         if self._state_guard:
             asyncio.create_task(
                 self._state_guard.start_watching(),
@@ -238,6 +228,80 @@ class SpineProxy:
         await self.pool.shutdown_all()
         self.logger.close()
 
+    async def _background_init(self) -> None:
+        """
+        Heavy initialization that runs in the background.
+
+        Two phases:
+          1. Connect servers → set _ready (fast, ~5s)
+          2. Load ML model → enable routing (slow, ~30s)
+
+        tools/list and tools/call wait for phase 1 only.
+        Semantic routing activates silently when phase 2 completes.
+        """
+        try:
+            # Phase 1: Connect to downstream servers (fast)
+            await self.pool.start_all()
+
+            # Mark ready NOW — tools work immediately
+            self._ready = True
+            self.logger.info(
+                EventType.STARTUP,
+                message="Servers connected, tools available",
+                tools=len(self.pool.all_tools()),
+            )
+
+            # Phase 2: Load ML model in background (slow, non-blocking)
+            if self._router:
+                asyncio.create_task(
+                    self._load_router(),
+                    name="spine-router-load",
+                )
+
+        except Exception as e:
+            self.logger.error(
+                EventType.STARTUP,
+                error=f"Background init failed: {e}",
+            )
+            self._ready = True  # Mark ready anyway so tools/list doesn't hang
+
+    async def _load_router(self) -> None:
+        """Load the semantic router ML model in the background."""
+        try:
+            all_tools = self.pool.all_tools()
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None, self._router.index_tools, all_tools
+            )
+            self.logger.info(
+                EventType.STARTUP,
+                component="router",
+                message="Semantic routing enabled",
+                indexed=self._router.indexed_count,
+            )
+        except ImportError:
+            self.logger.warn(
+                EventType.STARTUP,
+                component="router",
+                message="ML deps not installed, semantic routing disabled. "
+                        "Install with: pip install mcp-spine[ml]",
+            )
+            self._router = None
+        except Exception as e:
+            self.logger.warn(
+                EventType.STARTUP,
+                component="router",
+                message=f"Router init failed: {e}. Semantic routing disabled.",
+            )
+            self._router = None
+
+    async def _wait_for_ready(self, timeout: float = 120.0) -> None:
+        """Wait for background initialization to complete."""
+        waited = 0.0
+        while not self._ready and waited < timeout:
+            await asyncio.sleep(0.2)
+            waited += 0.2
+
     def _write_error(self, msg_id: int | str | None, code: int, message: str) -> None:
         """Write a JSON-RPC error directly to stdout."""
         resp = make_error(msg_id, code, message)
@@ -305,10 +369,14 @@ class SpineProxy:
         """
         Handle tools/list — the key interception point.
 
+        Waits for background init if servers aren't connected yet.
         Stage 1: Return all tools from all servers
         Stage 2+: Semantic routing filters to top-K
         Stage 3+: Schema minification reduces token count
         """
+        # Wait for servers to be ready (background init)
+        await self._wait_for_ready()
+
         all_tools = self.pool.all_tools()
 
         # Stage 2: Semantic routing — filter to top-K relevant tools
@@ -350,6 +418,7 @@ class SpineProxy:
         """
         Handle tools/call — route to the correct downstream server.
 
+        Waits for background init if servers aren't connected yet.
         Security checks applied:
           1. Policy check (is this tool allowed?)
           2. Rate limiting (per-tool and global)
@@ -357,6 +426,9 @@ class SpineProxy:
           4. Secret scrubbing (in responses, if enabled)
           5. Audit logging (always)
         """
+        # Wait for servers to be ready (background init)
+        await self._wait_for_ready()
+
         params = message.get("params", {})
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
@@ -489,6 +561,8 @@ class SpineProxy:
         self, msg_id: int | str, method: str, message: dict
     ) -> dict:
         """Relay a request to all servers and merge results."""
+        await self._wait_for_ready()
+
         # For resources/list, prompts/list — aggregate from all servers
         results = []
         for server_name, server in self.pool._servers.items():
