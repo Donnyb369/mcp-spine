@@ -288,5 +288,22 @@ def audit(db: str, event: str | None, tool: str | None, last: int, security_only
     console.print(table)
 
 
+@main.command()
+@click.option(
+    "--db", default="spine_audit.db",
+    help="Path to the audit database",
+)
+@click.option(
+    "--refresh", default=1.0, type=float,
+    help="Refresh rate in seconds",
+)
+def dashboard(db: str, refresh: float) -> None:
+    """Launch the live TUI dashboard."""
+    from spine.dashboard import SpineDashboard
+
+    dash = SpineDashboard(db_path=db, refresh_rate=refresh)
+    dash.run()
+
+
 if __name__ == "__main__":
     main()
