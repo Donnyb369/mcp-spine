@@ -271,6 +271,8 @@ class SpineProxy:
                     EventType.STARTUP,
                     message=f"All servers connected ({final_count} tools total)",
                 )
+                # Notify Claude that new tools are available
+                self._send_notification("notifications/tools/list_changed")
 
             # Phase 2: Load ML model in background (slow, non-blocking)
             if self._router:
@@ -327,6 +329,18 @@ class SpineProxy:
         """Write a JSON-RPC error directly to stdout."""
         resp = make_error(msg_id, code, message)
         out = json.dumps(resp, separators=(",", ":")) + "\n"
+        sys.stdout.buffer.write(out.encode())
+        sys.stdout.buffer.flush()
+
+    def _send_notification(self, method: str, params: dict | None = None) -> None:
+        """Send a JSON-RPC notification to the client (no id, no response expected)."""
+        notification: dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "method": method,
+        }
+        if params:
+            notification["params"] = params
+        out = json.dumps(notification, separators=(",", ":")) + "\n"
         sys.stdout.buffer.write(out.encode())
         sys.stdout.buffer.flush()
 
