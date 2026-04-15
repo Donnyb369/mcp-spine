@@ -1,0 +1,50 @@
+# ============================================================
+# MCP Spine — Quickstart Config
+# ============================================================
+# Copy this file to spine.toml and update the paths below.
+# This config works out of the box with safe defaults.
+
+[spine]
+log_level = "info"
+audit_db = "spine_audit.db"
+
+# ── Add your servers below ──────────────────────────────────
+# Uncomment and update paths for the servers you use.
+
+[[servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/your/project"]
+timeout_seconds = 120
+
+# [[servers]]
+# name = "memory"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-memory"]
+# timeout_seconds = 60
+
+# [[servers]]
+# name = "github"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-github"]
+# env = { GITHUB_TOKEN = "ghp_your_token_here" }
+# timeout_seconds = 180
+
+# ── Schema Minification ─────────────────────────────────────
+# Level 2 = 61% token savings. Safe for all tools.
+[minifier]
+level = 2
+
+# ── State Guard ─────────────────────────────────────────────
+# Watches your files and prevents context rot.
+[state_guard]
+enabled = true
+watch_paths = ["/path/to/your/project"]
+ignore_patterns = ["**/.git/**", "**/node_modules/**", "**/__pycache__/**"]
+
+# ── Security ────────────────────────────────────────────────
+[security]
+scrub_secrets_in_logs = true
+audit_all_tool_calls = true
+global_rate_limit = 120
+per_tool_rate_limit = 60

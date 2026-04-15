@@ -1,0 +1,16 @@
+{
+  "$schema": "https://glama.ai/api/mcp/v1/schemas/glama.json",
+  "name": "mcp-spine",
+  "display_name": "MCP Spine",
+  "description": "Context Minifier & State Guard — Local-first MCP middleware proxy that reduces token waste by 61%, prevents context rot, and adds security hardening.",
+  "version": "0.2.0",
+  "repository": "https://github.com/Donnyb369/mcp-spine",
+  "license": "MIT",
+  "runtime": "python",
+  "mcpServers": {
+    "spine": {
+      "command": "python",
+      "args": ["-u", "-m", "spine.cli", "serve", "--config", "spine.toml"]
+    }
+  }
+}
