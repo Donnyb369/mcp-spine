@@ -1,5 +1,7 @@
 # MCP Spine
 
+[![mcp-spine MCP server](https://glama.ai/mcp/servers/Donnyb369/mcp-spine/badges/card.svg)](https://glama.ai/mcp/servers/Donnyb369/mcp-spine)
+
 **Context Minifier & State Guard** — A local-first MCP middleware proxy that reduces token waste, prevents tool attrition, and eliminates context rot.
 
 MCP Spine sits between your LLM client (Claude Desktop, etc.) and your MCP servers, providing security hardening, intelligent tool routing, schema compression, and file state tracking — all through a single proxy.
