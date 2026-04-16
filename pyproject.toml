@@ -1,6 +1,6 @@
 [project]
 name = "mcp-spine"
-version = "0.2.0"
+version = "0.2.1"
 description = "Context Minifier & State Guard — MCP middleware proxy that reduces token waste, prevents tool attrition, and eliminates context rot"
 requires-python = ">=3.11"
 license = "MIT"
