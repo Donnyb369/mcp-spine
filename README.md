@@ -2,19 +2,28 @@
 
 [![mcp-spine MCP server](https://glama.ai/mcp/servers/Donnyb369/mcp-spine/badges/score.svg)](https://glama.ai/mcp/servers/Donnyb369/mcp-spine)
 
-**Context Minifier & State Guard** — A local-first MCP middleware proxy that reduces token waste, prevents tool attrition, and eliminates context rot.
+**The middleware layer MCP is missing.** Security, routing, token control, and compliance — between your LLM and your tools.
 
-MCP Spine sits between your LLM client (Claude Desktop, etc.) and your MCP servers, providing security hardening, intelligent tool routing, schema compression, and file state tracking — all through a single proxy.
+MCP Spine is a local-first proxy that sits between Claude Desktop (or any MCP client) and your MCP servers. One config, one entry point, full control over what goes in, what comes out, and what gets logged.
 
-## Why
+57 tools across 5 servers. One proxy. Zero tokens wasted.
 
-LLM agents using MCP tools face three problems:
+## The Problem
 
-1. **Token waste** — Tool schemas consume thousands of tokens per request. With 40+ tools loaded, you're burning context on JSON schemas before the conversation even starts.
-2. **Context rot** — In long sessions, LLMs revert to editing old file versions they memorized earlier, silently overwriting your latest changes.
-3. **No security boundary** — MCP servers run with full access. There's no audit trail, no rate limiting, no secret scrubbing between the LLM and your tools.
+You've connected Claude to GitHub, Slack, your database, your filesystem. Now you have 40+ tools loaded, thousands of tokens burned on schemas every turn, no audit trail, no rate limits, and no way to stop the LLM from reading your boss's DMs. MCP gives agents power. Spine gives you control.
 
-MCP Spine solves all three.
+## What It Does
+
+| Layer | What it solves |
+|---|---|
+| **Security Proxy** | Rate limiting, secret scrubbing, path jails, HMAC audit trail |
+| **Semantic Router** | Only relevant tools reach the LLM — local embeddings, no API calls |
+| **Schema Minifier** | 61% token savings by stripping unnecessary schema fields |
+| **State Guard** | SHA-256 file pins prevent the LLM from editing stale versions |
+| **Token Budget** | Daily limits with warn/block enforcement and persistent tracking |
+| **Plugin System** | Custom middleware hooks — filter, transform, block per tool |
+| **HITL Confirmation** | Destructive tools pause for human approval before executing |
+| **Multi-User Audit** | Session-tagged audit trail for shared deployments |
 
 ## Demo
 
@@ -34,17 +43,14 @@ pip install mcp-spine[ml]
 ## Quick Start
 
 ```bash
-# Interactive setup wizard
+# Interactive setup wizard — detects your servers, asks about features
 mcp-spine init
 
 # Or quick default config
 mcp-spine init --quick
 
-# Diagnose your setup
+# Check everything works
 mcp-spine doctor --config spine.toml
-
-# Validate config
-mcp-spine verify --config spine.toml
 
 # Start the proxy
 mcp-spine serve --config spine.toml
@@ -59,18 +65,16 @@ Replace all your individual MCP server entries with a single Spine entry:
   "mcpServers": {
     "spine": {
       "command": "python",
-      "args": ["-u", "-m", "spine.cli", "serve", "--config", "/path/to/spine.toml"],
+      "args": ["-m", "spine.cli", "serve", "--config", "/path/to/spine.toml"],
       "cwd": "/path/to/mcp-spine"
     }
   }
 }
 ```
 
-The `-u` flag ensures unbuffered stdout, preventing pipe hangs on Windows.
-
 ## Features
 
-### Stage 1: Security Proxy
+### Security Proxy (Stage 1)
 - JSON-RPC message validation and sanitization
 - Secret scrubbing (AWS keys, GitHub tokens, bearer tokens, private keys, connection strings)
 - Per-tool and global rate limiting with sliding windows
@@ -80,7 +84,7 @@ The `-u` flag ensures unbuffered stdout, preventing pipe hangs on Windows.
 - Circuit breakers on failing servers
 - Declarative security policies from config
 
-### Stage 2: Semantic Router
+### Semantic Router (Stage 2)
 - Local vector embeddings using `all-MiniLM-L6-v2` (no API calls, no data leaves your machine)
 - ChromaDB-backed tool indexing
 - Query-time routing: only the most relevant tools are sent to the LLM
@@ -88,13 +92,13 @@ The `-u` flag ensures unbuffered stdout, preventing pipe hangs on Windows.
 - Keyword overlap + recency boost reranking
 - Background model loading — tools work immediately, routing activates when ready
 
-### Stage 3: Schema Minification
+### Schema Minification (Stage 3)
 - 4 aggression levels (0=off, 1=light, 2=standard, 3=aggressive)
 - Level 2 achieves **61% token savings** on tool schemas
 - Strips `$schema`, titles, `additionalProperties`, parameter descriptions, defaults
 - Preserves all required fields and type information
 
-### Stage 4: State Guard
+### State Guard (Stage 4)
 - Watches project files via `watchfiles`
 - Maintains SHA-256 manifest with monotonic versioning
 - Injects compact state pins into tool responses
@@ -120,14 +124,6 @@ The `-u` flag ensures unbuffered stdout, preventing pipe hangs on Windows.
 - Automatic midnight rollover
 - `spine_budget` meta-tool to check usage mid-conversation
 - Token estimation via character-count heuristic (~4 chars/token)
-- Non-blocking: budget failures never crash the proxy
-
-### Config Hot-Reload
-- Edit `spine.toml` while Spine is running — changes apply in seconds
-- Hot-reloadable: minifier level, rate limits, security policies, token budget, state guard patterns
-- Non-reloadable (requires restart): server list, commands, audit DB path
-- SHA-256 polling with 2-second interval
-- All reloads logged to the audit trail
 
 ### Plugin System
 - Drop-in Python plugins that hook into the tool call pipeline
@@ -138,10 +134,25 @@ The `-u` flag ensures unbuffered stdout, preventing pipe hangs on Windows.
 - Auto-discovery from a configurable plugins directory
 - Example included: Slack channel compliance filter
 
-### SSE Transport
-- Connect to remote MCP servers over HTTP/SSE alongside local stdio servers
-- No external dependencies (uses stdlib urllib)
-- Supports custom headers for authentication
+### Config Hot-Reload
+- Edit `spine.toml` while Spine is running — changes apply in seconds
+- Hot-reloadable: minifier level, rate limits, security policies, token budget, state guard patterns
+- Non-reloadable (requires restart): server list, commands, audit DB path
+- All reloads logged to the audit trail
+
+### Multi-User Audit
+- Unique session ID generated per client connection
+- Client name and version extracted from MCP handshake
+- All audit entries tagged with session ID
+- `mcp-spine audit --sessions` lists all client sessions
+- `mcp-spine audit --session <id>` filters entries by session
+- Enables compliance and usage tracking for shared deployments
+
+### Transport Support
+- **stdio** — local subprocess servers (filesystem, GitHub, SQLite, etc.)
+- **SSE** — legacy remote servers over HTTP/Server-Sent Events
+- **Streamable HTTP** — MCP 2025-03-26 spec, single-endpoint bidirectional transport with session management
+- All transports share the same security, routing, and audit pipeline
 
 ### Diagnostics
 
@@ -159,6 +170,8 @@ mcp-spine analytics --hours 24
 mcp-spine audit --last 50
 mcp-spine audit --security-only
 mcp-spine audit --tool write_file
+mcp-spine audit --sessions
+mcp-spine audit --session <session-id>
 ```
 
 ## Example Config
@@ -201,11 +214,19 @@ args = ["/path/to/node_modules/@modelcontextprotocol/server-brave-search/dist/in
 env = { BRAVE_API_KEY = "your_key" }
 timeout_seconds = 60
 
-# Remote server via SSE
+# Remote server via legacy SSE
 # [[servers]]
-# name = "remote-tools"
+# name = "remote-sse"
 # transport = "sse"
 # url = "https://your-server.com/sse"
+# headers = { Authorization = "Bearer token" }
+# timeout_seconds = 30
+
+# Remote server via Streamable HTTP (MCP 2025-03-26)
+# [[servers]]
+# name = "remote-api"
+# transport = "streamable-http"
+# url = "https://your-server.com/mcp"
 # headers = { Authorization = "Bearer token" }
 # timeout_seconds = 30
 
@@ -277,16 +298,18 @@ Defense-in-depth — every layer assumes the others might fail.
 | Destructive operations | `require_confirmation` pauses for user approval |
 | Runaway token spend | Daily budget limits with warn/block enforcement |
 | Unvetted plugins | Allow/deny lists, directory isolation, audit logging |
+| Sensitive data exposure | Plugin-based response filtering (e.g., Slack channel compliance) |
 
 ## Architecture
 
 ```
-Client ◄──stdio──► MCP Spine ◄──stdio──► Filesystem Server
-                       │      ◄──stdio──► GitHub Server
-                       │      ◄──stdio──► SQLite Server
-                       │      ◄──stdio──► Memory Server
-                       │      ◄──stdio──► Brave Search
-                       │      ◄──SSE────► Remote Server
+Client ◄──stdio──► MCP Spine ◄──stdio────────► Filesystem Server
+                       │      ◄──stdio────────► GitHub Server
+                       │      ◄──stdio────────► SQLite Server
+                       │      ◄──stdio────────► Memory Server
+                       │      ◄──stdio────────► Brave Search
+                       │      ◄──SSE──────────► Legacy Remote
+                       │      ◄──Streamable HTTP──► Modern Remote
                    ┌───┴───┐
                    │SecPol │  ← Rate limits, path jail, secret scrub
                    │Router │  ← Semantic routing (local embeddings)
@@ -296,6 +319,7 @@ Client ◄──stdio──► MCP Spine ◄──stdio──► Filesystem Serv
                    │Memory │  ← Tool output cache
                    │Budget │  ← Daily token tracking + limits
                    │Plugin │  ← Custom middleware hooks
+                   │Audit  │  ← Session-tagged multi-user trail
                    └───────┘
 ```
 
@@ -330,7 +354,7 @@ mcp-spine/
 │   ├── proxy.py            # Core proxy event loop
 │   ├── protocol.py         # JSON-RPC message handling
 │   ├── transport.py        # Server pool, circuit breakers, concurrent startup
-│   ├── audit.py            # Structured logging + SQLite audit trail
+│   ├── audit.py            # Structured logging + SQLite audit trail + sessions
 │   ├── router.py           # Semantic routing (ChromaDB + sentence-transformers)
 │   ├── minifier.py         # Schema pruning (4 aggression levels)
 │   ├── state_guard.py      # File watcher + SHA-256 manifest + pin injection
@@ -338,7 +362,8 @@ mcp-spine/
 │   ├── budget.py           # Token budget tracker (daily limits + persistence)
 │   ├── plugins.py          # Plugin system (hooks, discovery, chaining)
 │   ├── dashboard.py        # Live TUI dashboard (Rich)
-│   ├── sse_client.py       # SSE transport client for remote servers
+│   ├── sse_client.py       # SSE transport client (legacy)
+│   ├── streamable_http.py  # Streamable HTTP transport (MCP 2025-03-26)
 │   └── security/
 │       ├── secrets.py      # Credential detection & scrubbing
 │       ├── paths.py        # Path traversal jail
@@ -355,7 +380,8 @@ mcp-spine/
 │   ├── test_state_guard.py # State guard tests
 │   ├── test_proxy_features.py  # HITL, dashboard, analytics tests
 │   ├── test_memory.py      # Tool output memory tests
-│   └── test_budget.py      # Token budget tracker tests
+│   ├── test_budget.py      # Token budget tracker tests
+│   └── test_plugins.py     # Plugin system tests
 ├── examples/
 │   └── slack_filter.py     # Example: Slack compliance filter plugin
 ├── configs/
@@ -371,7 +397,7 @@ mcp-spine/
 pytest tests/ -v
 ```
 
-160+ tests covering security, config validation, schema minification, state guard, HITL policies, dashboard queries, analytics, tool memory, token budget tracking, plugin system, and Windows path edge cases.
+190+ tests covering security, config validation, schema minification, state guard, HITL policies, dashboard queries, analytics, tool memory, token budget tracking, plugin system, and Windows path edge cases.
 
 CI runs on every push: Windows + Linux, Python 3.11/3.12/3.13.
 
