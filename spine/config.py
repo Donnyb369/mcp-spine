@@ -104,6 +104,15 @@ class TokenBudgetConfig:
 
 
 @dataclass
+class PluginConfig:
+    """Plugin system settings."""
+    enabled: bool = False
+    directory: str = "plugins"
+    allow_list: list[str] = field(default_factory=list)
+    deny_list: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SpineConfig:
     log_level: str = "info"
     log_file: str | None = None
@@ -114,6 +123,7 @@ class SpineConfig:
     state_guard: StateGuardConfig = field(default_factory=StateGuardConfig)
     minifier: MinifierConfig = field(default_factory=MinifierConfig)
     token_budget: TokenBudgetConfig = field(default_factory=TokenBudgetConfig)
+    plugins: PluginConfig = field(default_factory=PluginConfig)
     security: SecurityPolicy = field(default_factory=SecurityPolicy)
 
     def validate(self) -> list[str]:
@@ -206,6 +216,14 @@ def parse_config(raw: dict[str, Any]) -> SpineConfig:
         action=tb_raw.get("action", "warn"),
     )
 
+    pl_raw = raw.get("plugins", {})
+    plugins = PluginConfig(
+        enabled=pl_raw.get("enabled", False),
+        directory=pl_raw.get("directory", "plugins"),
+        allow_list=pl_raw.get("allow_list", []),
+        deny_list=pl_raw.get("deny_list", []),
+    )
+
     config = SpineConfig(
         log_level=spine_section.get("log_level", "info"),
         log_file=spine_section.get("log_file"),
@@ -215,6 +233,7 @@ def parse_config(raw: dict[str, Any]) -> SpineConfig:
         state_guard=state_guard,
         minifier=minifier,
         token_budget=token_budget,
+        plugins=plugins,
         security=security,
     )
     config.validate()

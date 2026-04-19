@@ -132,6 +132,18 @@ class SpineProxy:
             ttl_seconds=3600.0,
         )
 
+        # Plugin system
+        from spine.plugins import PluginManager
+        self._plugin_mgr = PluginManager(config.plugins, self.logger)
+        plugin_count = self._plugin_mgr.discover_and_load()
+        if plugin_count:
+            self._plugin_mgr.fire_startup(config)
+            self.logger.info(
+                EventType.STARTUP,
+                component="plugins",
+                message=f"{plugin_count} plugin(s) loaded",
+            )
+
     async def start(self) -> None:
         """Start the proxy: enter message loop immediately, init servers in background."""
         self.logger.info(
@@ -252,6 +264,7 @@ class SpineProxy:
             return
         self._running = False
         self.logger.info(EventType.SHUTDOWN)
+        self._plugin_mgr.fire_shutdown()
         await self.pool.shutdown_all()
         if getattr(self, "_budget", None) is not None:
             self._budget.close()
@@ -595,6 +608,9 @@ class SpineProxy:
         # Strip internal metadata before sending to client
         clean_tools = [self._clean_tool(t) for t in allowed_tools]
 
+        # ── Plugin hook: on_tool_list ──
+        clean_tools = self._plugin_mgr.fire_tool_list(clean_tools)
+
         self.logger.info(
             EventType.TOOL_LIST,
             total=len(all_tools),
@@ -715,6 +731,18 @@ class SpineProxy:
         if policy and policy.require_confirmation:
             return self._request_confirmation(msg_id, tool_name, arguments, message)
 
+        # ── Plugin hook: on_tool_call ──
+        from spine.plugins import PluginBlockError
+        try:
+            arguments = self._plugin_mgr.fire_tool_call(tool_name, arguments)
+        except PluginBlockError as e:
+            self.logger.security(
+                EventType.POLICY_DENY,
+                tool_name=tool_name,
+                reason=f"Blocked by plugin: {e.message}",
+            )
+            return make_error(msg_id, TOOL_BLOCKED, e.message)
+
         # ── Route to downstream server ──
         server = self.pool.route_tool(tool_name)
         if server is None:
@@ -745,6 +773,14 @@ class SpineProxy:
 
         # Cache tool result in memory
         self._memory.store(tool_name, arguments, result.get("result", result))
+
+        # ── Plugin hook: on_tool_response ──
+        result_payload = result.get("result", result)
+        result_payload = self._plugin_mgr.fire_tool_response(
+            tool_name, arguments, result_payload
+        )
+        if isinstance(result, dict) and "result" in result:
+            result["result"] = result_payload
 
         # ── Token Budget: record + maybe inject warning ──
         response_payload = result.get("result", result)
