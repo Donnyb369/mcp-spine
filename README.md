@@ -20,6 +20,8 @@ MCP Spine solves all three.
 
 ![MCP Spine Doctor](docs/demo.gif)
 
+*Runs on Windows, macOS, and Linux. CI tested across all three.*
+
 ## Install
 
 ```bash
