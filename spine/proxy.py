@@ -43,6 +43,7 @@ from spine.security import (
     RateLimiter,
     ValidationError,
     contains_secret,
+    scramble_pii_value,
     scrub_secrets,
 )
 from spine.state_guard import StateGuard
@@ -710,17 +711,25 @@ class SpineProxy:
                 ),
             )
 
-        # ── Security Check 5: Human-in-the-loop ──
-        policy = self.config.security.get_tool_policy(tool_name)
-        if policy and policy.require_confirmation:
-            return self._request_confirmation(msg_id, tool_name, arguments, message)
-
         # ── Route to downstream server ──
         server = self.pool.route_tool(tool_name)
         if server is None:
             return make_error(
                 msg_id, TOOL_NOT_FOUND,
                 f"No server available for tool '{tool_name}'"
+            )
+
+        display_arguments = self._scramble_pii_arguments(arguments, server)
+
+        # ── Security Check 5: Human-in-the-loop ──
+        policy = self.config.security.get_tool_policy(tool_name)
+        if policy and policy.require_confirmation:
+            return self._request_confirmation(
+                msg_id,
+                tool_name,
+                arguments,
+                message,
+                display_arguments=display_arguments,
             )
 
         # ── Execute with timing ──
@@ -735,6 +744,13 @@ class SpineProxy:
         if self.config.security.scrub_secrets_in_responses:
             result = self._scrub_response(result)
 
+        # ── Security Check 6: Scramble PII in this server's response ──
+        if server.config.scramble_pii_in_responses:
+            result = self._scramble_pii_response(
+                result,
+                use_nlp=server.config.scramble_pii_use_nlp,
+            )
+
         # Stage 2: Record tool usage for recency-based reranking
         if self._router:
             self._router.record_tool_call(tool_name)
@@ -744,7 +760,7 @@ class SpineProxy:
             result = self._state_guard.inject_pin_into_response(result)
 
         # Cache tool result in memory
-        self._memory.store(tool_name, arguments, result.get("result", result))
+        self._memory.store(tool_name, display_arguments, result.get("result", result))
 
         # ── Token Budget: record + maybe inject warning ──
         response_payload = result.get("result", result)
@@ -817,6 +833,19 @@ class SpineProxy:
     def _scrub_response(self, result: dict) -> dict:
         """Deep-scrub secrets from a tool response."""
         return json.loads(scrub_secrets(json.dumps(result)))
+
+    def _scramble_pii_response(self, result: dict, use_nlp: bool = True) -> dict:
+        """Deep-scramble PII from a tool response."""
+        return scramble_pii_value(result, use_nlp=use_nlp)
+
+    def _scramble_pii_arguments(self, arguments: dict, server: Any) -> dict:
+        """Deep-scramble PII from tool arguments before display/cache surfaces."""
+        if not server.config.scramble_pii_in_responses:
+            return arguments
+        return scramble_pii_value(
+            arguments,
+            use_nlp=server.config.scramble_pii_use_nlp,
+        )
 
     def _clean_tool(self, tool: dict) -> dict:
         """Remove internal spine metadata from a tool before sending to client."""
@@ -972,7 +1001,8 @@ class SpineProxy:
 
     def _request_confirmation(
         self, msg_id: int | str, tool_name: str,
-        arguments: dict[str, Any], original_message: dict
+        arguments: dict[str, Any], original_message: dict,
+        display_arguments: dict[str, Any] | None = None,
     ) -> dict:
         """
         Intercept a tool call that requires confirmation.
@@ -997,7 +1027,7 @@ class SpineProxy:
         )
 
         # Format arguments for display
-        args_display = json.dumps(arguments, indent=2)
+        args_display = json.dumps(display_arguments or arguments, indent=2)
 
         return make_response(msg_id, {
             "content": [
@@ -1054,6 +1084,15 @@ class SpineProxy:
         ):
             result = await server.send_request(
                 "tools/call", pending["original_message"].get("params")
+            )
+
+        if self.config.security.scrub_secrets_in_responses:
+            result = self._scrub_response(result)
+
+        if server.config.scramble_pii_in_responses:
+            result = self._scramble_pii_response(
+                result,
+                use_nlp=server.config.scramble_pii_use_nlp,
             )
 
         response_result = result.get("result", result)
@@ -1220,4 +1259,3 @@ class SpineProxy:
                 },
             },
         }
-

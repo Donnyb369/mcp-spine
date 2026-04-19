@@ -39,6 +39,8 @@ class ServerConfig:
     transport: str = "stdio"
     url: str = ""
     headers: dict[str, str] = field(default_factory=dict)
+    scramble_pii_in_responses: bool = False
+    scramble_pii_use_nlp: bool = True
 
     def validate(self, allowed_commands: frozenset[str]) -> list[str]:
         warnings = []
@@ -171,6 +173,8 @@ def parse_config(raw: dict[str, Any]) -> SpineConfig:
             transport=srv.get("transport", "stdio"),
             url=srv.get("url", ""),
             headers=srv.get("headers", {}),
+            scramble_pii_in_responses=srv.get("scramble_pii_in_responses", False),
+            scramble_pii_use_nlp=srv.get("scramble_pii_use_nlp", True),
         ))
 
     routing_raw = raw.get("routing", {})

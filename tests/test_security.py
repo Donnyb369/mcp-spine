@@ -12,8 +12,11 @@ Covers:
 """
 
 
+import importlib.util
+
 import pytest
 
+import spine.security.pii as pii_module
 from spine.security import (
     PathViolation,
     RateLimitBucket,
@@ -25,11 +28,14 @@ from spine.security import (
     hash_tool_schema,
     is_path_safe,
     resolve_env_vars,
+    scramble_pii,
+    scramble_pii_value,
     scrub_secrets,
     validate_message,
     validate_path,
     validate_server_command,
 )
+from spine.security.pii import PiiScramblerUnavailable
 from spine.security.policy import (
     PathPolicy,
     PolicyAction,
@@ -80,6 +86,150 @@ class TestSecretScrubbing:
         assert "AKIAIOSFODNN7EXAMPLE" not in cleaned
         assert "ghp_" not in cleaned
 
+
+# ───────────────────────────────────────────────
+# PII Detection & Scrambling
+# ───────────────────────────────────────────────
+
+class TestPIIScrambling:
+    has_pii_deps = all(
+        importlib.util.find_spec(module)
+        for module in ("presidio_analyzer", "presidio_anonymizer", "faker")
+    )
+
+    def test_missing_optional_dependencies_raise_clear_error(self):
+        if self.has_pii_deps:
+            pytest.skip("PII optional dependencies are installed")
+
+        with pytest.raises(PiiScramblerUnavailable, match="Presidio|Faker"):
+            scramble_pii("Contact jane.doe@example.org", use_nlp=False)
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_email_scrambled(self):
+        text = "Contact jane.doe@sample.org for access"
+        scrambled = scramble_pii(text, use_nlp=False)
+        assert "jane.doe@sample.org" not in scrambled
+        assert "@" in scrambled
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_email_scrambling_is_deterministic(self):
+        text = "Email jane.doe@sample.org"
+        assert scramble_pii(text, use_nlp=False) == scramble_pii(text, use_nlp=False)
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_ssn_scrambled_but_keeps_shape(self):
+        scrambled = scramble_pii("ssn: 856-45-6789", use_nlp=False)
+        assert "856-45-6789" not in scrambled
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_phone_scrambled(self):
+        scrambled = scramble_pii("Call 415-867-5309", use_nlp=False)
+        assert "415-867-5309" not in scrambled
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_labeled_postal_code_scrambled_without_touching_plain_ids(self):
+        scrambled = scramble_pii("zip: 90210; order id 12345", use_nlp=False)
+        assert "90210" not in scrambled
+        assert "12345" in scrambled
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_deep_scramble_uses_structured_keys_as_context(self):
+        value = {"postal_code": "90210", "id": "12345"}
+        scrambled = scramble_pii_value(value, use_nlp=False)
+        assert scrambled["postal_code"] != "90210"
+        assert scrambled["id"] == "12345"
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_serialized_database_rows_use_column_name_context(self):
+        text = "[{'column_name': 'email', 'value': 'jane@example.com'}]"
+        scrambled = scramble_pii(text, use_nlp=False)
+        assert "jane@example.com" not in scrambled
+        assert "column_name" in scrambled
+        assert "email" in scrambled
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_serialized_database_rows_scramble_direct_keyed_values(self):
+        text = "[{'email': 'jane@example.com', 'zipcode': '90210'}]"
+        scrambled = scramble_pii(text, use_nlp=False)
+        assert "jane@example.com" not in scrambled
+        assert "90210" not in scrambled
+        assert "zipcode" in scrambled
+
+    def test_structured_database_rows_leave_names_and_ids_alone(self, monkeypatch):
+        monkeypatch.setattr(pii_module, "_fake_value", lambda entity, value: f"[{entity}]")
+        text = (
+            "[{'id': 1, 'user_id': 2, 'first_name': 'Jane', "
+            "'last_name': 'Smith', 'name': 'users', "
+            "'encrypted_pin': 'pin-secret-abc', "
+            "'encrypted_otp_secret': 'otp-secret-encrypted'}]"
+        )
+
+        scrambled = pii_module._scramble_structured_text(text)
+
+        assert "'id': 1" in scrambled
+        assert "'user_id': 2" in scrambled
+        assert "'first_name': 'Jane'" in scrambled
+        assert "'last_name': 'Smith'" in scrambled
+        assert "'name': 'users'" in scrambled
+        assert "'encrypted_pin': 'pin-secret-abc'" in scrambled
+        assert "'encrypted_otp_secret': 'otp-secret-encrypted'" in scrambled
+
+    def test_structured_database_rows_scramble_user_profile_contact_fields(self, monkeypatch):
+        monkeypatch.setattr(pii_module, "_fake_value", lambda entity, value: f"[{entity}]")
+        text = (
+            "[{'email': 'jane@example.com', 'parent_email_address': 'parent@example.com', "
+            "'phone_number': '415-867-5309', 'zipcode': '90210', "
+            "'library_card_number': 'LC-12345', 'cultural_pass_number': 'CP-98765', "
+            "'birthdate': '2012-03-04', 'current_sign_in_ip': '198.51.100.10', "
+            "'login': 'jane-reader', 'username': 'jreader', "
+            "'school_student_id': 12345, 'safe_code': 'BOOK-ALPHA'}]"
+        )
+
+        scrambled = pii_module._scramble_structured_text(text)
+
+        for value in (
+            "jane@example.com",
+            "parent@example.com",
+            "415-867-5309",
+            "90210",
+            "LC-12345",
+            "CP-98765",
+            "2012-03-04",
+            "198.51.100.10",
+            "jane-reader",
+            "jreader",
+        ):
+            assert value not in scrambled
+
+        assert "'school_student_id': 12345" in scrambled
+        assert "BOOK-ALPHA" in scrambled
+
+    def test_sql_input_scrambling_preserves_join_ids(self, monkeypatch):
+        monkeypatch.setattr(pii_module, "_fake_value", lambda entity, value: f"[{entity}]")
+        sql = (
+            "SELECT users.*, profiles.* FROM users "
+            "JOIN profiles ON profiles.user_id = users.id "
+            "WHERE users.id = '12' "
+            "AND profiles.user_id = '12' "
+            "AND users.email = 'jane@example.com' "
+            "AND profiles.zipcode = '90210' "
+            "AND profiles.address = '123 Main St' "
+            "AND users.login = 'jane-reader' "
+            "AND users.username = 'jreader'"
+        )
+
+        scrambled = pii_module._scramble_structured_text(sql)
+
+        assert "users.id = '12'" in scrambled
+        assert "profiles.user_id = '12'" in scrambled
+        for value in (
+            "jane@example.com",
+            "90210",
+            "123 Main St",
+            "jane-reader",
+            "jreader",
+        ):
+            assert value not in scrambled
 
 # ───────────────────────────────────────────────
 # Path Traversal Prevention

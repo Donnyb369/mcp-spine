@@ -29,6 +29,29 @@ class TestConfigValidation:
         assert len(cfg.servers) == 1
         assert cfg.servers[0].name == "test"
 
+    def test_server_pii_scrambling_flags(self):
+        raw = {
+            "servers": [
+                {
+                    "name": "postgres",
+                    "command": "python",
+                    "scramble_pii_in_responses": True,
+                    "scramble_pii_use_nlp": False,
+                },
+                {
+                    "name": "other",
+                    "command": "python",
+                },
+            ],
+        }
+
+        cfg = parse_config(raw)
+
+        assert cfg.servers[0].scramble_pii_in_responses is True
+        assert cfg.servers[0].scramble_pii_use_nlp is False
+        assert cfg.servers[1].scramble_pii_in_responses is False
+        assert cfg.servers[1].scramble_pii_use_nlp is True
+
     def test_server_with_blocked_command(self):
         raw = {
             "servers": [
