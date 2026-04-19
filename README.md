@@ -34,8 +34,11 @@ pip install mcp-spine[ml]
 ## Quick Start
 
 ```bash
-# Generate config
+# Interactive setup wizard
 mcp-spine init
+
+# Or quick default config
+mcp-spine init --quick
 
 # Diagnose your setup
 mcp-spine doctor --config spine.toml
@@ -118,6 +121,13 @@ The `-u` flag ensures unbuffered stdout, preventing pipe hangs on Windows.
 - `spine_budget` meta-tool to check usage mid-conversation
 - Token estimation via character-count heuristic (~4 chars/token)
 - Non-blocking: budget failures never crash the proxy
+
+### Config Hot-Reload
+- Edit `spine.toml` while Spine is running — changes apply in seconds
+- Hot-reloadable: minifier level, rate limits, security policies, token budget, state guard patterns
+- Non-reloadable (requires restart): server list, commands, audit DB path
+- SHA-256 polling with 2-second interval
+- All reloads logged to the audit trail
 
 ### SSE Transport
 - Connect to remote MCP servers over HTTP/SSE alongside local stdio servers
