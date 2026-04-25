@@ -152,6 +152,33 @@ class SpineProxy:
             webhook_config = WebhookConfig()
         self._webhooks = WebhookManager(webhook_config, self.logger)
 
+        # Tool response cache
+        from spine.tool_cache import ToolCache
+        tc = config.tool_cache
+        self._tool_cache = ToolCache(
+            cacheable_tools=tc.cacheable_tools if tc.enabled else [],
+            ttl_seconds=tc.ttl_seconds,
+            max_entries=tc.max_entries,
+        ) if tc.enabled else None
+
+        # Tool aliasing (original_name -> alias)
+        self._aliases: dict[str, str] = {}
+        self._reverse_aliases: dict[str, str] = {}  # alias -> original_name
+        if config.tool_aliases.enabled:
+            self._aliases = dict(config.tool_aliases.aliases)
+            self._reverse_aliases = {v: k for k, v in self._aliases.items()}
+
+        # Per-server token budgets {server_name: TokenBudget}
+        self._server_budgets: dict[str, Any] = {}
+        for srv in config.servers:
+            if srv.token_limit > 0:
+                self._server_budgets[srv.name] = TokenBudget(
+                    daily_limit=srv.token_limit,
+                    warn_at=config.token_budget.warn_at,
+                    action=config.token_budget.action,
+                    db_path=None,  # per-server budgets are in-memory only
+                )
+
     async def start(self) -> None:
         """Start the proxy: enter message loop immediately, init servers in background."""
         self.logger.info(
@@ -637,6 +664,13 @@ class SpineProxy:
         # Strip internal metadata before sending to client
         clean_tools = [self._clean_tool(t) for t in allowed_tools]
 
+        # ── Tool aliasing: rename tools for the LLM ──
+        if self._aliases:
+            for tool in clean_tools:
+                original = tool.get("name", "")
+                if original in self._aliases:
+                    tool["name"] = self._aliases[original]
+
         # ── Plugin hook: on_tool_list ──
         clean_tools = self._plugin_mgr.fire_tool_list(clean_tools)
 
@@ -671,6 +705,22 @@ class SpineProxy:
         params = message.get("params", {})
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
+
+        # ── Resolve alias back to original tool name ──
+        original_tool_name = tool_name
+        if tool_name in self._reverse_aliases:
+            tool_name = self._reverse_aliases[tool_name]
+
+        # ── Tool cache: check for cached response ──
+        if self._tool_cache:
+            cached = self._tool_cache.get(tool_name, arguments)
+            if cached is not None:
+                self.logger.info(
+                    EventType.TOOL_RESPONSE,
+                    tool_name=tool_name,
+                    cache_hit=True,
+                )
+                return make_response(msg_id, cached)
 
         # ── Security Check 1: Policy ──
         if not self.config.security.is_tool_allowed(tool_name):
@@ -815,6 +865,30 @@ class SpineProxy:
         # Cache tool result in memory
         self._memory.store(tool_name, arguments, result.get("result", result))
 
+        # ── Tool cache: store response for cacheable tools ──
+        if self._tool_cache:
+            self._tool_cache.put(tool_name, arguments, result.get("result", result))
+
+        # ── Token estimation for budget tracking ──
+        response_payload = result.get("result", result)
+        req_tokens = estimate_tokens(arguments)
+        resp_tokens = estimate_tokens(response_payload)
+        total_tokens = req_tokens + resp_tokens
+
+        # ── Per-server token budget ──
+        if server.name in self._server_budgets:
+            srv_budget = self._server_budgets[server.name]
+            srv_budget.record(total_tokens)
+            if srv_budget.is_over_budget():
+                self.logger.warn(
+                    EventType.TOOL_RESPONSE,
+                    tool_name=tool_name,
+                    server_name=server.name,
+                    reason="per_server_budget_exceeded",
+                    tokens_used=srv_budget.used(),
+                    tokens_limit=srv_budget.daily_limit,
+                )
+
         # ── Plugin hook: on_tool_response ──
         result_payload = result.get("result", result)
         result_payload = self._plugin_mgr.fire_tool_response(
@@ -824,10 +898,6 @@ class SpineProxy:
             result["result"] = result_payload
 
         # ── Token Budget: record + maybe inject warning ──
-        response_payload = result.get("result", result)
-        req_tokens = estimate_tokens(arguments)
-        resp_tokens = estimate_tokens(response_payload)
-        total_tokens = req_tokens + resp_tokens
         self._budget.record(total_tokens)
 
         if self.config.token_budget.action == "warn":

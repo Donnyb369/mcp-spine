@@ -39,6 +39,7 @@ class ServerConfig:
     transport: str = "stdio"
     url: str = ""
     headers: dict[str, str] = field(default_factory=dict)
+    token_limit: int = 0  # per-server daily token limit (0 = use global)
 
     def validate(self, allowed_commands: frozenset[str]) -> list[str]:
         warnings = []
@@ -104,6 +105,22 @@ class TokenBudgetConfig:
 
 
 @dataclass
+class ToolAliasConfig:
+    """Tool aliasing — rename tools so the LLM sees cleaner names."""
+    enabled: bool = False
+    aliases: dict[str, str] = field(default_factory=dict)  # original -> alias
+
+
+@dataclass
+class ToolCacheConfig:
+    """Tool response caching for read-only tools."""
+    enabled: bool = False
+    cacheable_tools: list[str] = field(default_factory=list)  # tool name patterns
+    ttl_seconds: float = 300.0  # 5 minutes default
+    max_entries: int = 100
+
+
+@dataclass
 class PluginConfig:
     """Plugin system settings."""
     enabled: bool = False
@@ -140,6 +157,8 @@ class SpineConfig:
     state_guard: StateGuardConfig = field(default_factory=StateGuardConfig)
     minifier: MinifierConfig = field(default_factory=MinifierConfig)
     token_budget: TokenBudgetConfig = field(default_factory=TokenBudgetConfig)
+    tool_aliases: ToolAliasConfig = field(default_factory=ToolAliasConfig)
+    tool_cache: ToolCacheConfig = field(default_factory=ToolCacheConfig)
     plugins: PluginConfig = field(default_factory=PluginConfig)
     webhooks: WebhookConfig = field(default_factory=WebhookConfig)
     security: SecurityPolicy = field(default_factory=SecurityPolicy)
@@ -199,6 +218,7 @@ def parse_config(raw: dict[str, Any]) -> SpineConfig:
             transport=srv.get("transport", "stdio"),
             url=srv.get("url", ""),
             headers=srv.get("headers", {}),
+            token_limit=srv.get("token_limit", 0),
         ))
 
     routing_raw = raw.get("routing", {})
@@ -234,6 +254,20 @@ def parse_config(raw: dict[str, Any]) -> SpineConfig:
         action=tb_raw.get("action", "warn"),
     )
 
+    ta_raw = raw.get("tool_aliases", {})
+    tool_aliases = ToolAliasConfig(
+        enabled=ta_raw.get("enabled", False),
+        aliases=ta_raw.get("aliases", {}),
+    )
+
+    tc_raw = raw.get("tool_cache", {})
+    tool_cache = ToolCacheConfig(
+        enabled=tc_raw.get("enabled", False),
+        cacheable_tools=tc_raw.get("cacheable_tools", []),
+        ttl_seconds=tc_raw.get("ttl_seconds", 300.0),
+        max_entries=tc_raw.get("max_entries", 100),
+    )
+
     pl_raw = raw.get("plugins", {})
     plugins = PluginConfig(
         enabled=pl_raw.get("enabled", False),
@@ -266,6 +300,8 @@ def parse_config(raw: dict[str, Any]) -> SpineConfig:
         state_guard=state_guard,
         minifier=minifier,
         token_budget=token_budget,
+        tool_aliases=tool_aliases,
+        tool_cache=tool_cache,
         plugins=plugins,
         webhooks=webhooks,
         security=security,
