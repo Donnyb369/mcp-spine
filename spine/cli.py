@@ -599,6 +599,68 @@ def _budget_snapshot(row: dict | None) -> dict:
 
 @main.command()
 @click.option("--db", default="spine_audit.db", help="Audit database path")
+@click.option("--format", "-f", "fmt", type=click.Choice(["csv", "json"]), default="csv", help="Export format")
+@click.option("--hours", "-h", default=24, help="Hours of history to export")
+@click.option("--output", "-o", default=None, help="Output file path (default: stdout)")
+@click.option("--event", "-e", default=None, help="Filter by event type")
+def export(db: str, fmt: str, hours: int, output: str | None, event: str | None):
+    """Export audit data to CSV or JSON."""
+    import csv
+    import io
+    import sqlite3
+
+    db_path = Path(db)
+    if not db_path.exists():
+        console.print(f"[red]Audit database not found: {db}[/red]")
+        sys.exit(1)
+
+    import time as _time
+    cutoff = _time.time() - (hours * 3600)
+
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+
+    query = """
+        SELECT timestamp, event_type, tool_name, server_name, details, session_id, created_at
+        FROM audit_log
+        WHERE timestamp > ?
+    """
+    params: list = [cutoff]
+
+    if event:
+        query += " AND event_type = ?"
+        params.append(event)
+
+    query += " ORDER BY timestamp ASC"
+
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+
+    if not rows:
+        console.print("[dim]No data to export.[/dim]")
+        return
+
+    data = [dict(row) for row in rows]
+
+    if fmt == "json":
+        import json as _json
+        content = _json.dumps(data, indent=2, default=str)
+    else:
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=data[0].keys())
+        writer.writeheader()
+        writer.writerows(data)
+        content = buf.getvalue()
+
+    if output:
+        Path(output).write_text(content, encoding="utf-8")
+        console.print(f"[green]Exported {len(data)} entries to {output}[/green]")
+    else:
+        click.echo(content)
+
+
+@main.command()
+@click.option("--db", default="spine_audit.db", help="Audit database path")
 @click.option("--port", "-p", default=8777, help="Port to serve on")
 @click.option("--host", default="127.0.0.1", help="Host to bind to")
 def web(db: str, port: int, host: str) -> None:

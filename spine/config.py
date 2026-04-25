@@ -42,15 +42,11 @@ class ServerConfig:
 
     def validate(self, allowed_commands: frozenset[str]) -> list[str]:
         warnings = []
-        if self.transport == "sse" or self.transport == "streamable-http":
+        if self.transport == "sse":
             if not self.url:
-                raise ValueError(
-                    f"Server '{self.name}': {self.transport} transport requires 'url'"
-                )
+                raise ValueError(f"Server '{self.name}': SSE transport requires 'url'")
             if not self.url.startswith(("http://", "https://")):
-                raise ValueError(
-                    f"Server '{self.name}': url must start with http:// or https://"
-                )
+                raise ValueError(f"Server '{self.name}': SSE url must start with http:// or https://")
         else:
             if not self.command:
                 raise ValueError(f"Server '{self.name}': stdio transport requires 'command'")
@@ -117,6 +113,23 @@ class PluginConfig:
 
 
 @dataclass
+class WebhookTarget:
+    """A single webhook destination."""
+    url: str = ""
+    events: list[str] = field(default_factory=lambda: ["security"])
+    format: str = "json"
+    headers: dict[str, str] = field(default_factory=dict)
+    timeout: float = 10.0
+
+
+@dataclass
+class WebhookConfig:
+    """Webhook notification settings."""
+    enabled: bool = False
+    hooks: list[WebhookTarget] = field(default_factory=list)
+
+
+@dataclass
 class SpineConfig:
     log_level: str = "info"
     log_file: str | None = None
@@ -128,6 +141,7 @@ class SpineConfig:
     minifier: MinifierConfig = field(default_factory=MinifierConfig)
     token_budget: TokenBudgetConfig = field(default_factory=TokenBudgetConfig)
     plugins: PluginConfig = field(default_factory=PluginConfig)
+    webhooks: WebhookConfig = field(default_factory=WebhookConfig)
     security: SecurityPolicy = field(default_factory=SecurityPolicy)
 
     def validate(self) -> list[str]:
@@ -228,6 +242,21 @@ def parse_config(raw: dict[str, Any]) -> SpineConfig:
         deny_list=pl_raw.get("deny_list", []),
     )
 
+    wh_raw = raw.get("webhooks", {})
+    wh_hooks = []
+    for hook_raw in wh_raw.get("hooks", []):
+        wh_hooks.append(WebhookTarget(
+            url=hook_raw.get("url", ""),
+            events=hook_raw.get("events", ["security"]),
+            format=hook_raw.get("format", "json"),
+            headers=hook_raw.get("headers", {}),
+            timeout=hook_raw.get("timeout", 10.0),
+        ))
+    webhooks = WebhookConfig(
+        enabled=wh_raw.get("enabled", False),
+        hooks=wh_hooks,
+    )
+
     config = SpineConfig(
         log_level=spine_section.get("log_level", "info"),
         log_file=spine_section.get("log_file"),
@@ -238,6 +267,7 @@ def parse_config(raw: dict[str, Any]) -> SpineConfig:
         minifier=minifier,
         token_budget=token_budget,
         plugins=plugins,
+        webhooks=webhooks,
         security=security,
     )
     config.validate()

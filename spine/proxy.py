@@ -144,6 +144,14 @@ class SpineProxy:
                 message=f"{plugin_count} plugin(s) loaded",
             )
 
+        # Webhook notifications
+        from spine.webhooks import WebhookManager
+        webhook_config = getattr(config, "webhooks", None)
+        if webhook_config is None:
+            from spine.webhooks import WebhookConfig
+            webhook_config = WebhookConfig()
+        self._webhooks = WebhookManager(webhook_config, self.logger)
+
     async def start(self) -> None:
         """Start the proxy: enter message loop immediately, init servers in background."""
         self.logger.info(
@@ -680,6 +688,7 @@ class SpineProxy:
                 tool_name=tool_name,
                 reason="Global rate limit exceeded",
             )
+            self._webhooks.notify("rate_limited", {"tool_name": tool_name, "reason": "Global rate limit exceeded"})
             return make_error(msg_id, RATE_LIMITED, "Global rate limit exceeded")
 
         if not self.rate_limiter.check(tool_name):
@@ -688,6 +697,7 @@ class SpineProxy:
                 tool_name=tool_name,
                 remaining=self.rate_limiter.remaining(tool_name),
             )
+            self._webhooks.notify("rate_limited", {"tool_name": tool_name, "reason": "Per-tool rate limit exceeded"})
             return make_error(
                 msg_id, RATE_LIMITED,
                 f"Rate limit exceeded for tool '{tool_name}'"
@@ -740,6 +750,12 @@ class SpineProxy:
                 tokens_used=stats["tokens_used"],
                 tokens_limit=stats["daily_limit"],
             )
+            self._webhooks.notify("budget_exceeded", {
+                "tool_name": tool_name,
+                "tokens_used": stats["tokens_used"],
+                "tokens_limit": stats["daily_limit"],
+                "usage_pct": stats.get("usage_pct", 1.0),
+            })
             return make_error(
                 msg_id,
                 TOOL_BLOCKED,
@@ -765,6 +781,7 @@ class SpineProxy:
                 tool_name=tool_name,
                 reason=f"Blocked by plugin: {e.message}",
             )
+            self._webhooks.notify("tool_blocked", {"tool_name": tool_name, "reason": e.message})
             return make_error(msg_id, TOOL_BLOCKED, e.message)
 
         # ── Route to downstream server ──
@@ -831,6 +848,12 @@ class SpineProxy:
                     tokens_limit=stats["daily_limit"],
                     usage_pct=stats["usage_pct"],
                 )
+                self._webhooks.notify("budget_warn", {
+                    "tool_name": tool_name,
+                    "tokens_used": stats["tokens_used"],
+                    "tokens_limit": stats["daily_limit"],
+                    "usage_pct": stats["usage_pct"],
+                })
 
         # ── Audit Log ──
         self.logger.info(
