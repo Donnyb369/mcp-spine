@@ -1,5 +1,6 @@
 # MCP Spine
 
+[![PyPI](https://img.shields.io/pypi/v/mcp-spine)](https://pypi.org/project/mcp-spine/)
 [![mcp-spine MCP server](https://glama.ai/mcp/servers/Donnyb369/mcp-spine/badges/score.svg)](https://glama.ai/mcp/servers/Donnyb369/mcp-spine)
 
 **The middleware layer MCP is missing.** Security, routing, token control, and compliance — between your LLM and your tools.
@@ -23,7 +24,11 @@ You've connected Claude to GitHub, Slack, your database, your filesystem. Now yo
 | **Token Budget** | Daily limits with warn/block enforcement and persistent tracking |
 | **Plugin System** | Custom middleware hooks — filter, transform, block per tool |
 | **HITL Confirmation** | Destructive tools pause for human approval before executing |
+| **Injection Detection** | Scans tool responses for prompt injection before they reach the LLM |
 | **Multi-User Audit** | Session-tagged audit trail for shared deployments |
+| **Tool Caching** | LRU cache for read-only tools — skip redundant downstream calls |
+| **Webhook Alerts** | Slack/Discord/JSON notifications on security events and budget warnings |
+| **Web Dashboard** | Browser-based monitoring with live stats, latency tracking, request log |
 
 ## Demo
 
@@ -62,6 +67,12 @@ mcp-spine doctor --config spine.toml
 
 # Start the proxy
 mcp-spine serve --config spine.toml
+
+# Open the web dashboard
+mcp-spine web --db spine_audit.db
+
+# Export analytics
+mcp-spine export --format csv --hours 24 --output report.csv
 ```
 
 ## Claude Desktop Integration
@@ -105,6 +116,7 @@ Replace all your individual MCP server entries with a single Spine entry:
 - Level 2 achieves **61% token savings** on tool schemas
 - Strips `$schema`, titles, `additionalProperties`, parameter descriptions, defaults
 - Preserves all required fields and type information
+- Token savings tracked in audit trail and visible in web dashboard
 
 ### State Guard (Stage 4)
 - Watches project files via `watchfiles`
@@ -128,10 +140,10 @@ Replace all your individual MCP server entries with a single Spine entry:
 ### Token Budget
 - Daily token consumption tracking across all tool calls
 - Configurable daily limit with warn/block actions
+- Per-server token limits for cost control
 - Persistent SQLite storage (survives restarts within the same day)
 - Automatic midnight rollover
 - `spine_budget` meta-tool to check usage mid-conversation
-- Token estimation via character-count heuristic (~4 chars/token)
 
 ### Plugin System
 - Drop-in Python plugins that hook into the tool call pipeline
@@ -141,6 +153,24 @@ Replace all your individual MCP server entries with a single Spine entry:
 - Allow/deny lists for plugin access control
 - Auto-discovery from a configurable plugins directory
 - Example included: Slack channel compliance filter
+
+### Prompt Injection Detection
+- Scans all tool responses before they reach the LLM
+- Detects system prompt overrides, role injection, instruction hijacking, jailbreak attempts
+- Detects data exfiltration URLs and encoded payloads
+- Configurable action: log, strip, or block
+- All detections logged as security events and sent via webhooks
+
+### Tool Aliasing
+- Rename tools so the LLM sees cleaner names
+- `create_or_update_file` → `edit_github_file`
+- Aliases resolved transparently — downstream servers see original names
+
+### Tool Response Caching
+- LRU cache for read-only tools (configurable patterns)
+- Cache hits skip the downstream call entirely
+- TTL-based expiration (5 minutes default)
+- Automatic invalidation on cache overflow
 
 ### Config Hot-Reload
 - Edit `spine.toml` while Spine is running — changes apply in seconds
@@ -154,7 +184,22 @@ Replace all your individual MCP server entries with a single Spine entry:
 - All audit entries tagged with session ID
 - `mcp-spine audit --sessions` lists all client sessions
 - `mcp-spine audit --session <id>` filters entries by session
-- Enables compliance and usage tracking for shared deployments
+
+### Webhook Notifications
+- POST alerts to Slack, Discord, or any JSON endpoint
+- Triggers: security events, budget warnings, budget exceeded, tool blocked, rate limited
+- Pre-formatted payloads for Slack blocks and Discord embeds
+- Non-blocking (background threads)
+
+### Latency Monitoring
+- Tracks response times per server (rolling window)
+- Warns when average latency exceeds threshold (default 5s)
+- Server latency panel in web dashboard with OK/SLOW status
+
+### Analytics Export
+- `mcp-spine export --format csv` or `--format json`
+- Filter by hours, event type
+- Output to file or stdout for piping
 
 ### Transport Support
 - **stdio** — local subprocess servers (filesystem, GitHub, SQLite, etc.)
@@ -162,17 +207,34 @@ Replace all your individual MCP server entries with a single Spine entry:
 - **Streamable HTTP** — MCP 2025-03-26 spec, single-endpoint bidirectional transport with session management
 - All transports share the same security, routing, and audit pipeline
 
+### Web Dashboard
+- Browser-based monitoring at `localhost:8777`
+- Live stat cards: tool calls, security events, sessions, token budget, token savings
+- Recent tool calls with server, session, and status
+- Tool usage bar chart
+- Server latency table with avg/max and OK/SLOW status
+- Full request/response log with duration and token counts
+- Security events and client sessions tables
+- Auto-refresh every 3 seconds
+- Zero dependencies (Python stdlib `http.server`)
+
 ### Diagnostics
 
 ```bash
 # Check your setup
 mcp-spine doctor --config spine.toml
 
-# Live monitoring dashboard
+# Live TUI monitoring
 mcp-spine dashboard
+
+# Web dashboard
+mcp-spine web --db spine_audit.db
 
 # Usage analytics (includes token budget)
 mcp-spine analytics --hours 24
+
+# Export data
+mcp-spine export --format csv --hours 168 --output weekly.csv
 
 # Query audit log
 mcp-spine audit --last 50
@@ -189,7 +251,7 @@ mcp-spine audit --session <session-id>
 log_level = "info"
 audit_db = "spine_audit.db"
 
-# Add as many servers as you need — they start concurrently
+# Downstream servers — start concurrently
 [[servers]]
 name = "filesystem"
 command = "npx"
@@ -218,17 +280,10 @@ timeout_seconds = 60
 [[servers]]
 name = "brave-search"
 command = "node"
-args = ["/path/to/node_modules/@modelcontextprotocol/server-brave-search/dist/index.js"]
+args = ["/path/to/server-brave-search/dist/index.js"]
 env = { BRAVE_API_KEY = "your_key" }
+token_limit = 100000  # per-server daily budget
 timeout_seconds = 60
-
-# Remote server via legacy SSE
-# [[servers]]
-# name = "remote-sse"
-# transport = "sse"
-# url = "https://your-server.com/sse"
-# headers = { Authorization = "Bearer token" }
-# timeout_seconds = 30
 
 # Remote server via Streamable HTTP (MCP 2025-03-26)
 # [[servers]]
@@ -236,7 +291,6 @@ timeout_seconds = 60
 # transport = "streamable-http"
 # url = "https://your-server.com/mcp"
 # headers = { Authorization = "Bearer token" }
-# timeout_seconds = 30
 
 # Semantic routing
 [routing]
@@ -247,25 +301,43 @@ rerank = true
 [minifier]
 level = 2
 
-# Token budget — track and limit daily token spend
+# Token budget
 [token_budget]
-daily_limit = 500000    # tokens per day (0 = unlimited)
-warn_at = 0.8           # warn at 80% usage
-action = "warn"         # "warn" = log warning, "block" = reject tool calls
+daily_limit = 500000
+warn_at = 0.8
+action = "warn"
 
-# State guard — prevent context rot
+# Tool aliasing
+[tool_aliases]
+enabled = true
+aliases = { "create_or_update_file" = "edit_github_file" }
+
+# Tool response caching
+[tool_cache]
+enabled = true
+cacheable_tools = ["read_file", "read_query", "list_directory"]
+ttl_seconds = 300
+
+# State guard
 [state_guard]
 enabled = true
 watch_paths = ["/path/to/project"]
 
-# Plugins — custom middleware hooks
+# Plugins
 [plugins]
 enabled = true
 directory = "plugins"
-# allow_list = ["slack-filter"]  # optional whitelist
-# deny_list = ["debug-plugin"]  # optional blacklist
 
-# Human-in-the-loop for destructive tools
+# Webhooks
+[webhooks]
+enabled = true
+
+[[webhooks.hooks]]
+url = "https://hooks.slack.com/services/T.../B.../xxx"
+events = ["security", "budget_warn"]
+format = "slack"
+
+# Human-in-the-loop
 [[security.tools]]
 pattern = "write_file"
 action = "allow"
@@ -294,6 +366,7 @@ Defense-in-depth — every layer assumes the others might fail.
 
 | Threat | Mitigation |
 |---|---|
+| Prompt injection via tool responses | Automated pattern detection (8 categories), log/strip/block |
 | Prompt injection via tool args | Input validation, tool name allowlists |
 | Path traversal | Symlink-aware jail to `allowed_roots` |
 | Secret leakage | Automatic scrubbing of AWS keys, tokens, private keys |
@@ -304,9 +377,10 @@ Defense-in-depth — every layer assumes the others might fail.
 | Tool abuse | Policy-based blocking, audit logging, HITL confirmation |
 | Log tampering | HMAC fingerprints on every audit entry |
 | Destructive operations | `require_confirmation` pauses for user approval |
-| Runaway token spend | Daily budget limits with warn/block enforcement |
+| Runaway token spend | Daily budget limits with warn/block + per-server limits |
 | Unvetted plugins | Allow/deny lists, directory isolation, audit logging |
-| Sensitive data exposure | Plugin-based response filtering (e.g., Slack channel compliance) |
+| Sensitive data exposure | Plugin-based response filtering (e.g., Slack compliance) |
+| Server degradation | Latency monitoring with automatic alerts |
 
 ## Architecture
 
@@ -320,14 +394,17 @@ Client ◄──stdio──► MCP Spine ◄──stdio────────�
                        │      ◄──Streamable HTTP──► Modern Remote
                    ┌───┴───┐
                    │SecPol │  ← Rate limits, path jail, secret scrub
+                   │Inject │  ← Prompt injection detection
                    │Router │  ← Semantic routing (local embeddings)
                    │Minify │  ← Schema compression (61% savings)
+                   │Cache  │  ← Tool response caching (LRU + TTL)
                    │Guard  │  ← File state pinning (SHA-256)
                    │HITL   │  ← Human-in-the-loop confirmation
                    │Memory │  ← Tool output cache
                    │Budget │  ← Daily token tracking + limits
                    │Plugin │  ← Custom middleware hooks
                    │Audit  │  ← Session-tagged multi-user trail
+                   │Hooks  │  ← Webhook notifications
                    └───────┘
 ```
 
@@ -357,7 +434,7 @@ Battle-tested on Windows with specific hardening for:
 mcp-spine/
 ├── pyproject.toml
 ├── spine/
-│   ├── cli.py              # Click CLI (init, serve, verify, audit, dashboard, analytics, doctor)
+│   ├── cli.py              # CLI: init, serve, verify, audit, dashboard, analytics, doctor, web, export
 │   ├── config.py           # TOML config loader with validation
 │   ├── proxy.py            # Core proxy event loop
 │   ├── protocol.py         # JSON-RPC message handling
@@ -369,7 +446,11 @@ mcp-spine/
 │   ├── memory.py           # Tool output cache (ring buffer + dedup + TTL)
 │   ├── budget.py           # Token budget tracker (daily limits + persistence)
 │   ├── plugins.py          # Plugin system (hooks, discovery, chaining)
+│   ├── injection.py        # Prompt injection detection (8 pattern categories)
+│   ├── tool_cache.py       # Tool response caching (LRU + TTL)
+│   ├── webhooks.py         # Webhook notifications (Slack, Discord, JSON)
 │   ├── dashboard.py        # Live TUI dashboard (Rich)
+│   ├── web_dashboard.py    # Browser-based web dashboard
 │   ├── sse_client.py       # SSE transport client (legacy)
 │   ├── streamable_http.py  # Streamable HTTP transport (MCP 2025-03-26)
 │   └── security/
@@ -382,21 +463,21 @@ mcp-spine/
 │       ├── env.py          # Fail-closed env var resolution
 │       └── policy.py       # Declarative security policies
 ├── tests/
-│   ├── test_security.py    # Security tests
-│   ├── test_config.py      # Config validation tests
-│   ├── test_minifier.py    # Schema minification tests
-│   ├── test_state_guard.py # State guard tests
-│   ├── test_proxy_features.py  # HITL, dashboard, analytics tests
-│   ├── test_memory.py      # Tool output memory tests
-│   ├── test_budget.py      # Token budget tracker tests
-│   └── test_plugins.py     # Plugin system tests
+│   ├── test_security.py
+│   ├── test_config.py
+│   ├── test_minifier.py
+│   ├── test_state_guard.py
+│   ├── test_proxy_features.py
+│   ├── test_memory.py
+│   ├── test_budget.py
+│   └── test_plugins.py
 ├── examples/
 │   └── slack_filter.py     # Example: Slack compliance filter plugin
 ├── configs/
-│   └── example.spine.toml  # Complete reference config
+│   └── example.spine.toml
 └── .github/
     └── workflows/
-        └── ci.yml          # GitHub Actions: test + lint + publish
+        └── ci.yml
 ```
 
 ## Tests
@@ -405,9 +486,7 @@ mcp-spine/
 pytest tests/ -v
 ```
 
-190+ tests covering security, config validation, schema minification, state guard, HITL policies, dashboard queries, analytics, tool memory, token budget tracking, plugin system, and Windows path edge cases.
-
-CI runs on every push: Windows + Linux, Python 3.11/3.12/3.13.
+190+ tests. CI on Windows + Linux, Python 3.11/3.12/3.13.
 
 ## License
 
