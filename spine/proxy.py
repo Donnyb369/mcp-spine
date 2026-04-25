@@ -585,8 +585,18 @@ class SpineProxy:
                 all_tools = self._router.route(context, all_tools)
 
         # Stage 3: Schema minification — reduce token count
+        original_tokens = 0
+        minified_tokens = 0
         if self._minifier and self._minifier.level > 0:
+            for tool in all_tools:
+                original_tokens += self._minifier.estimate_tokens(tool)
             all_tools = self._minifier.minify_batch(all_tools)
+            for tool in all_tools:
+                minified_tokens += self._minifier.estimate_tokens(tool)
+        else:
+            for tool in all_tools:
+                original_tokens += self._minifier.estimate_tokens(tool)
+            minified_tokens = original_tokens
 
         # Filter by security policy
         allowed_tools = [
@@ -626,6 +636,9 @@ class SpineProxy:
             EventType.TOOL_LIST,
             total=len(all_tools),
             filtered=len(clean_tools),
+            original_tokens=original_tokens,
+            minified_tokens=minified_tokens,
+            savings_pct=round((1 - minified_tokens / original_tokens) * 100, 1) if original_tokens > 0 else 0,
         )
 
         return make_response(msg_id, {"tools": clean_tools})

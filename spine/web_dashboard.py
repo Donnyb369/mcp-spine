@@ -71,7 +71,28 @@ class DashboardAPI:
             "security_events": sec[0]["cnt"] if sec else 0,
             "sessions": sessions[0]["cnt"] if sessions else 0,
             "budget": dict(budget_data) if budget else None,
+            "token_savings": self._token_savings(),
         }
+
+    def _token_savings(self) -> dict[str, Any]:
+        """Get the latest token savings from schema minification."""
+        row = self._query("""
+            SELECT json_extract(details, '$.original_tokens') as original,
+                   json_extract(details, '$.minified_tokens') as minified,
+                   json_extract(details, '$.savings_pct') as pct
+            FROM audit_log
+            WHERE event_type = 'tool_list'
+              AND details LIKE '%original_tokens%'
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """)
+        if row and row[0].get("original"):
+            return {
+                "original_tokens": row[0]["original"],
+                "minified_tokens": row[0]["minified"],
+                "savings_pct": row[0]["pct"],
+            }
+        return {"original_tokens": 0, "minified_tokens": 0, "savings_pct": 0}
 
     def recent_calls(self, limit: int = 20) -> list[dict]:
         """Recent tool calls with timing."""
@@ -224,7 +245,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   .grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     gap: 16px;
     padding: 24px 32px;
   }
@@ -390,6 +411,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .grid { grid-template-columns: repeat(2, 1fr); }
     .panels, .bottom-panels { grid-template-columns: 1fr; }
   }
+  @media (max-width: 500px) {
+    .grid { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
@@ -420,6 +444,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="value" id="stat-budget">—</div>
     <div class="sub" id="stat-budget-sub"></div>
     <div class="budget-bar"><div class="budget-fill" id="budget-fill"></div></div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Token Savings</div>
+    <div class="value" id="stat-savings">—</div>
+    <div class="sub" id="stat-savings-sub"></div>
   </div>
 </div>
 
@@ -527,6 +556,18 @@ async function refresh() {
     } else {
       document.getElementById('stat-budget').textContent = '—';
       document.getElementById('stat-budget-sub').textContent = 'Not configured';
+    }
+
+    // Token savings
+    const savings = overview.token_savings;
+    if (savings && savings.original_tokens > 0) {
+      document.getElementById('stat-savings').textContent = savings.savings_pct + '%';
+      document.getElementById('stat-savings').style.color = 'var(--green)';
+      document.getElementById('stat-savings-sub').textContent =
+        `${(savings.original_tokens - savings.minified_tokens).toLocaleString()} tokens saved`;
+    } else {
+      document.getElementById('stat-savings').textContent = '—';
+      document.getElementById('stat-savings-sub').textContent = 'No data yet';
     }
 
     // Recent calls
