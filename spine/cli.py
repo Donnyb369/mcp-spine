@@ -26,7 +26,7 @@ console = Console()
 
 DEFAULT_CONFIG = """\
 # MCP Spine Configuration
-# See: https://github.com/Donnyb369/mcp-spine
+# See: https://github.com/your-org/mcp-spine
 
 [spine]
 log_level = "info"                  # debug | info | warn | error
@@ -110,7 +110,7 @@ denied_patterns = [
 
 
 @click.group()
-@click.version_option(version="0.2.2", prog_name="mcp-spine")
+@click.version_option(version="0.1.0", prog_name="mcp-spine")
 def main():
     """MCP Spine — Context Minifier & State Guard"""
     pass
@@ -123,11 +123,8 @@ def main():
     help="Output path for the config file",
 )
 @click.option("--force", "-f", is_flag=True, help="Overwrite existing config")
-@click.option("--quick", "-q", is_flag=True, help="Skip wizard, write default config")
-def init(path: str, force: bool, quick: bool):
-    """Interactive setup wizard for MCP Spine configuration."""
-    import shutil
-
+def init(path: str, force: bool):
+    """Generate a starter spine.toml configuration."""
     config_path = Path(path)
     if config_path.exists() and not force:
         console.print(
@@ -136,335 +133,19 @@ def init(path: str, force: bool, quick: bool):
         )
         sys.exit(1)
 
-    if quick:
-        config_path.write_text(DEFAULT_CONFIG, encoding="utf-8")
-        console.print(f"[green]Created {config_path} (default template)[/green]")
-        return
-
-    # ── Interactive Wizard ──
-    console.print(Panel(
-        "[bold]MCP Spine Setup Wizard[/bold]\n\n"
-        "This will walk you through creating a spine.toml config.\n"
-        "Press Enter to accept defaults shown in [dim]brackets[/dim].",
-        border_style="blue",
-    ))
-
-    # 1. Project path
-    cwd = str(Path.cwd())
-    project_path = click.prompt(
-        "Project directory to protect",
-        default=cwd,
-    )
-    project_path = str(Path(project_path).resolve())
-
-    # 2. Audit DB
-    default_db = str(Path(project_path) / "spine_audit.db")
-    audit_db = click.prompt("Audit database path", default=default_db)
-
-    # 3. Servers — detect what's available
-    console.print("\n[bold]Server Detection[/bold]")
-    available_servers: list[dict] = []
-
-    # Check for npx/node
-    has_npx = shutil.which("npx") is not None or shutil.which("npx.cmd") is not None
-    has_node = shutil.which("node") is not None or shutil.which("node.EXE") is not None
-
-    server_catalog = [
-        {
-            "name": "filesystem",
-            "label": "Filesystem (read/write project files)",
-            "requires": "npx",
-            "command": "npx",
-            "args_tpl": ["-y", "@modelcontextprotocol/server-filesystem", "{project_path}"],
-            "env": {},
-            "default": True,
-        },
-        {
-            "name": "github",
-            "label": "GitHub (repos, issues, PRs)",
-            "requires": "npx",
-            "command": "npx",
-            "args_tpl": ["-y", "@modelcontextprotocol/server-github"],
-            "env": {"GITHUB_TOKEN": ""},
-            "env_prompt": "GitHub personal access token (leave blank to skip)",
-            "default": False,
-        },
-        {
-            "name": "memory",
-            "label": "Memory (knowledge graph)",
-            "requires": "npx",
-            "command": "npx",
-            "args_tpl": ["-y", "@modelcontextprotocol/server-memory"],
-            "env": {},
-            "default": True,
-        },
-        {
-            "name": "brave-search",
-            "label": "Brave Search (web search)",
-            "requires": "node",
-            "command": "node",
-            "args_tpl": [],
-            "env": {"BRAVE_API_KEY": ""},
-            "env_prompt": "Brave API key (leave blank to skip)",
-            "default": False,
-            "detect_path": True,
-        },
-        {
-            "name": "sqlite",
-            "label": "SQLite (database queries)",
-            "requires": "npx",
-            "command": "npx",
-            "args_tpl": ["-y", "mcp-server-sqlite", "--db-path", "{db_path}"],
-            "env": {},
-            "default": False,
-            "extra_prompt": "SQLite database file path",
-        },
-    ]
-
-    for srv in server_catalog:
-        req = srv["requires"]
-        if req == "npx" and not has_npx:
-            console.print(f"  [dim]Skipping {srv['label']} (npx not found)[/dim]")
-            continue
-        if req == "node" and not has_node:
-            console.print(f"  [dim]Skipping {srv['label']} (node not found)[/dim]")
-            continue
-
-        if click.confirm(f"  Add {srv['label']}?", default=srv["default"]):
-            server_entry = {
-                "name": srv["name"],
-                "command": srv["command"],
-                "args": [
-                    a.replace("{project_path}", project_path)
-                    for a in srv["args_tpl"]
-                ],
-                "env": {},
-                "timeout_seconds": 60 if srv["name"] != "filesystem" else 120,
-            }
-
-            # Handle env var prompts (API keys)
-            if srv.get("env_prompt"):
-                for key in srv["env"]:
-                    val = click.prompt(f"    {srv['env_prompt']}", default="", show_default=False)
-                    if val.strip():
-                        server_entry["env"][key] = val.strip()
-                    else:
-                        console.print(f"    [dim]Skipping {srv['name']} (no key provided)[/dim]")
-                        server_entry = None
-                        break
-
-            # Handle brave-search path detection
-            if server_entry and srv.get("detect_path") and srv["name"] == "brave-search":
-                import os
-                npm_root = os.environ.get("APPDATA", "")
-                brave_path = Path(npm_root) / "npm" / "node_modules" / "@modelcontextprotocol" / "server-brave-search" / "dist" / "index.js"
-                if brave_path.exists():
-                    server_entry["args"] = [str(brave_path)]
-                    console.print(f"    [green]Found Brave Search at {brave_path}[/green]")
-                else:
-                    typed_path = click.prompt(
-                        "    Path to server-brave-search/dist/index.js",
-                        default="",
-                        show_default=False,
-                    )
-                    if typed_path.strip():
-                        server_entry["args"] = [typed_path.strip()]
-                    else:
-                        console.print("    [dim]Skipping brave-search (no path)[/dim]")
-                        server_entry = None
-
-            # Handle extra prompts (e.g. SQLite db path)
-            if server_entry and srv.get("extra_prompt"):
-                extra_val = click.prompt(f"    {srv['extra_prompt']}", default="")
-                if extra_val.strip():
-                    server_entry["args"] = [
-                        a.replace("{db_path}", extra_val.strip())
-                        for a in server_entry["args"]
-                    ]
-                else:
-                    console.print(f"    [dim]Skipping {srv['name']} (no path)[/dim]")
-                    server_entry = None
-
-            if server_entry:
-                available_servers.append(server_entry)
-                console.print(f"    [green]Added {srv['name']}[/green]")
-
-    if not available_servers:
-        console.print("[yellow]No servers configured. You can add them manually later.[/yellow]")
-
-    # 4. Features
-    console.print("\n[bold]Features[/bold]")
-
-    minify_level = click.prompt(
-        "Schema minification level (0=off, 1=light, 2=standard, 3=aggressive)",
-        type=int,
-        default=2,
-    )
-
-    enable_state_guard = click.confirm("Enable State Guard (file change tracking)?", default=True)
-
-    enable_budget = click.confirm("Enable token budget tracking?", default=True)
-    daily_limit = 0
-    budget_action = "warn"
-    if enable_budget:
-        daily_limit = click.prompt("  Daily token limit", type=int, default=500000)
-        budget_action = click.prompt(
-            "  Action when budget exceeded (warn/block)",
-            type=click.Choice(["warn", "block"]),
-            default="warn",
+    config_path.write_text(DEFAULT_CONFIG, encoding="utf-8")
+    console.print(
+        Panel(
+            f"[green]Created {config_path}[/green]\n\n"
+            f"Next steps:\n"
+            f"  1. Edit {config_path} to add your MCP servers\n"
+            f"  2. Run [bold]mcp-spine verify[/bold] to validate\n"
+            f"  3. Update claude_desktop_config.json to use:\n"
+            f'     [dim]{{"command": "mcp-spine", "args": ["serve"]}}[/dim]',
+            title="MCP Spine Initialized",
+            border_style="green",
         )
-
-    enable_hitl = click.confirm("Enable human-in-the-loop for write operations?", default=True)
-
-    # 5. Generate config
-    lines = [
-        "# MCP Spine Configuration",
-        "# Generated by mcp-spine init",
-        "# See: https://github.com/Donnyb369/mcp-spine",
-        "",
-        "[spine]",
-        'log_level = "info"',
-        f'audit_db = "{audit_db}"',
-        "",
-        "# ── Downstream MCP Servers ──",
-    ]
-
-    for srv in available_servers:
-        lines.append("")
-        lines.append("[[servers]]")
-        lines.append(f'name = "{srv["name"]}"')
-        lines.append(f'command = "{srv["command"]}"')
-        # Format args
-        args_str = ", ".join(f'"{a}"' for a in srv["args"])
-        lines.append(f"args = [{args_str}]")
-        if srv["env"]:
-            env_parts = ", ".join(f'{k} = "{v}"' for k, v in srv["env"].items())
-            lines.append(f"env = {{ {env_parts} }}")
-        lines.append(f"timeout_seconds = {srv['timeout_seconds']}")
-
-    # Routing
-    lines.extend([
-        "",
-        "# ── Semantic Routing (Stage 2) ──",
-        "[routing]",
-        "max_tools = 15",
-        'always_include = ["spine_set_context"]',
-        "rerank = true",
-        "similarity_threshold = 0.3",
-    ])
-
-    # Minification
-    lines.extend([
-        "",
-        "# ── Schema Minification (Stage 3) ──",
-        "[minifier]",
-        f"level = {minify_level}",
-    ])
-
-    # Token budget
-    if enable_budget:
-        lines.extend([
-            "",
-            "# ── Token Budget ──",
-            "[token_budget]",
-            f"daily_limit = {daily_limit}",
-            "warn_at = 0.8",
-            f'action = "{budget_action}"',
-        ])
-
-    # State guard
-    if enable_state_guard:
-        lines.extend([
-            "",
-            "# ── State Guard (Stage 4) ──",
-            "[state_guard]",
-            "enabled = true",
-            f'watch_paths = ["{project_path}"]',
-            "max_tracked_files = 50",
-            "max_pin_files = 10",
-            "ignore_patterns = [",
-            '    "**/.git/**",',
-            '    "**/node_modules/**",',
-            '    "**/__pycache__/**",',
-            '    "**/.venv/**",',
-            '    "**/*.pyc",',
-            '    "**/.DS_Store",',
-            "]",
-        ])
-
-    # HITL
-    if enable_hitl:
-        lines.extend([
-            "",
-            "# ── Human-in-the-Loop ──",
-            "[[security.tools]]",
-            'pattern = "write_file"',
-            'action = "allow"',
-            "require_confirmation = true",
-            "",
-            "[[security.tools]]",
-            'pattern = "write_query"',
-            'action = "allow"',
-            "require_confirmation = true",
-            "",
-            "[[security.tools]]",
-            'pattern = "create_directory"',
-            'action = "allow"',
-            "require_confirmation = true",
-        ])
-
-    # Security
-    lines.extend([
-        "",
-        "# ── Security ──",
-        "[security]",
-        "scrub_secrets_in_logs = true",
-        "scrub_secrets_in_responses = false",
-        "audit_all_tool_calls = true",
-        "global_rate_limit = 120",
-        "per_tool_rate_limit = 60",
-        "",
-        "[security.path]",
-        f'allowed_roots = ["{project_path}"]',
-        "denied_patterns = [",
-        '    "**/.env",',
-        '    "**/.env.*",',
-        '    "**/*.pem",',
-        '    "**/*.key",',
-        '    "**/.ssh/*",',
-        '    "**/.aws/*",',
-        "]",
-        "",
-    ])
-
-    config_text = "\n".join(lines)
-    config_path.write_text(config_text, encoding="utf-8")
-
-    # Summary
-    server_names = ", ".join(s["name"] for s in available_servers) or "none"
-    features = []
-    if minify_level > 0:
-        features.append(f"minification L{minify_level}")
-    if enable_state_guard:
-        features.append("state guard")
-    if enable_budget:
-        features.append(f"token budget ({daily_limit:,}/day)")
-    if enable_hitl:
-        features.append("HITL confirmation")
-    features_str = ", ".join(features) or "none"
-
-    console.print(Panel(
-        f"[green]Created {config_path}[/green]\n\n"
-        f"  Servers:  {server_names}\n"
-        f"  Features: {features_str}\n\n"
-        f"Next steps:\n"
-        f"  1. Run [bold]mcp-spine verify --config {config_path}[/bold]\n"
-        f"  2. Run [bold]mcp-spine doctor --config {config_path}[/bold]\n"
-        f"  3. Add to claude_desktop_config.json:\n"
-        f'     [dim]"command": "python", "args": ["-m", "spine.cli", "serve", "--config", "{config_path}"][/dim]',
-        title="MCP Spine Configured",
-        border_style="green",
-    ))
+    )
 
 
 @main.command()
@@ -490,7 +171,7 @@ def serve(config: str):
         console.print(f"[red]Config error: {e}[/red]")
         sys.exit(1)
 
-    proxy = SpineProxy(cfg, config_path=config)
+    proxy = SpineProxy(cfg)
     asyncio.run(proxy.start())
 
 
@@ -543,19 +224,9 @@ def verify(config: str):
 @click.option("--db", default="spine_audit.db", help="Audit database path")
 @click.option("--event", "-e", default=None, help="Filter by event type")
 @click.option("--tool", "-t", default=None, help="Filter by tool name")
-@click.option("--session", "-s", default=None, help="Filter by session ID")
 @click.option("--last", "-n", default=20, help="Number of recent entries")
 @click.option("--security-only", is_flag=True, help="Show only security events")
-@click.option("--sessions", is_flag=True, help="List all sessions")
-def audit(
-    db: str,
-    event: str | None,
-    tool: str | None,
-    session: str | None,
-    last: int,
-    security_only: bool,
-    sessions: bool,
-):
+def audit(db: str, event: str | None, tool: str | None, last: int, security_only: bool):
     """Query the audit log."""
     import sqlite3
 
@@ -565,50 +236,7 @@ def audit(
         sys.exit(1)
 
     conn = sqlite3.connect(db)
-
-    # List sessions mode
-    if sessions:
-        rows = conn.execute("""
-            SELECT session_id,
-                   MIN(created_at) as first_seen,
-                   MAX(created_at) as last_seen,
-                   COUNT(*) as entries,
-                   MAX(CASE WHEN event_type = 'startup' AND details LIKE '%client_name%'
-                       THEN json_extract(details, '$.client_name') END) as client
-            FROM audit_log
-            WHERE session_id IS NOT NULL
-            GROUP BY session_id
-            ORDER BY first_seen DESC
-            LIMIT 20
-        """).fetchall()
-        conn.close()
-
-        if not rows:
-            console.print("[dim]No sessions found.[/dim]")
-            return
-
-        table = Table(title="Client Sessions")
-        table.add_column("Session ID", style="cyan", width=26)
-        table.add_column("Client", style="green")
-        table.add_column("First Seen", style="dim")
-        table.add_column("Last Seen", style="dim")
-        table.add_column("Entries", justify="right")
-
-        for sid, first, last_seen, count, client in rows:
-            table.add_row(
-                sid or "",
-                client or "",
-                first or "",
-                last_seen or "",
-                str(count),
-            )
-        console.print(table)
-        return
-
-    query = (
-        "SELECT timestamp, event_type, tool_name, server_name, details, fingerprint, session_id "
-        "FROM audit_log"
-    )
+    query = "SELECT timestamp, event_type, tool_name, server_name, details, fingerprint FROM audit_log"
     conditions = []
     params = []
 
@@ -618,9 +246,6 @@ def audit(
     if tool:
         conditions.append("tool_name = ?")
         params.append(tool)
-    if session:
-        conditions.append("session_id = ?")
-        params.append(session)
     if security_only:
         conditions.append(
             "event_type IN ('rate_limited', 'path_violation', "
@@ -643,12 +268,11 @@ def audit(
     table.add_column("Event", style="cyan")
     table.add_column("Tool", style="green")
     table.add_column("Server", style="blue")
-    table.add_column("Session", style="dim", width=8)
     table.add_column("Fingerprint", style="dim", width=12)
 
     import datetime
 
-    for ts, evt, tname, sname, details, fp, sid in reversed(rows):
+    for ts, evt, tname, sname, details, fp in reversed(rows):
         time_str = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S")
         style = "red bold" if evt in (
             "rate_limited", "path_violation", "secret_detected",
@@ -659,7 +283,6 @@ def audit(
             f"[{style}]{evt}[/{style}]" if style else evt,
             tname or "",
             sname or "",
-            (sid or "")[:8],
             fp or "",
         )
 
@@ -972,6 +595,17 @@ def _budget_snapshot(row: dict | None) -> dict:
         "tokens_remaining": remaining,
         "usage_pct": round(min(1.0, pct), 4),
     }
+
+
+@main.command()
+@click.option("--db", default="spine_audit.db", help="Audit database path")
+@click.option("--port", "-p", default=8777, help="Port to serve on")
+@click.option("--host", default="127.0.0.1", help="Host to bind to")
+def web(db: str, port: int, host: str) -> None:
+    """Open the web dashboard in your browser."""
+    from spine.web_dashboard import run_web_dashboard
+
+    run_web_dashboard(db_path=db, host=host, port=port)
 
 
 @main.command()
