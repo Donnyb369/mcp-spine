@@ -31,6 +31,14 @@ You've connected Claude to GitHub, Slack, your database, your filesystem. Now yo
 
 *Runs on Windows, macOS, and Linux. CI tested across all three.*
 
+### Web Dashboard
+
+![MCP Spine Web Dashboard](docs/dashboard.png)
+
+```bash
+mcp-spine web --db spine_audit.db
+```
+
 ## Install
 
 ```bash
