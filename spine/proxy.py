@@ -179,6 +179,22 @@ class SpineProxy:
                     db_path=None,  # per-server budgets are in-memory only
                 )
 
+        # Prompt injection detection
+        from spine.injection import InjectionDetector
+        self._injection_detector = InjectionDetector(
+            enabled=True,
+            action="log",
+        )
+
+        # Latency tracking for alerts {server_name: [latencies]}
+        self._latency_history: dict[str, list[float]] = {}
+        self._latency_threshold_ms = 5000.0  # warn if avg > 5s
+        self._latency_window = 10  # last N calls
+
+        # Tool dependency graph {tool_name: {co-called tools}}
+        self._tool_deps: dict[str, dict[str, int]] = {}
+        self._last_tool_call: str | None = None
+
     async def start(self) -> None:
         """Start the proxy: enter message loop immediately, init servers in background."""
         self.logger.info(
@@ -854,6 +870,48 @@ class SpineProxy:
         if self.config.security.scrub_secrets_in_responses:
             result = self._scrub_response(result)
 
+        # ── Security Check 6: Prompt injection detection ──
+        injection = self._injection_detector.scan_response(result)
+        if injection.detected:
+            self.logger.security(
+                EventType.VALIDATION_ERROR,
+                tool_name=tool_name,
+                server_name=server.name,
+                reason="prompt_injection_detected",
+                patterns=injection.patterns,
+                severity=injection.severity,
+            )
+            self._webhooks.notify("security", {
+                "tool_name": tool_name,
+                "reason": f"Prompt injection detected: {injection.details}",
+                "severity": injection.severity,
+            })
+            if self._injection_detector.action == "strip":
+                result = self._strip_injection_from_response(result)
+
+        # ── Latency tracking and alerts ──
+        duration = ctx.get("duration_ms", 0)
+        if duration and server.name:
+            history = self._latency_history.setdefault(server.name, [])
+            history.append(duration)
+            if len(history) > self._latency_window:
+                history[:] = history[-self._latency_window:]
+            avg = sum(history) / len(history)
+            if avg > self._latency_threshold_ms and len(history) >= 3:
+                self.logger.warn(
+                    EventType.TOOL_RESPONSE,
+                    server_name=server.name,
+                    reason="latency_degradation",
+                    avg_latency_ms=round(avg),
+                    threshold_ms=self._latency_threshold_ms,
+                )
+
+        # ── Tool dependency graph ──
+        if self._last_tool_call and self._last_tool_call != tool_name:
+            deps = self._tool_deps.setdefault(self._last_tool_call, {})
+            deps[tool_name] = deps.get(tool_name, 0) + 1
+        self._last_tool_call = tool_name
+
         # Stage 2: Record tool usage for recency-based reranking
         if self._router:
             self._router.record_tool_call(tool_name)
@@ -970,6 +1028,12 @@ class SpineProxy:
     def _scrub_response(self, result: dict) -> dict:
         """Deep-scrub secrets from a tool response."""
         return json.loads(scrub_secrets(json.dumps(result)))
+
+    def _strip_injection_from_response(self, result: dict) -> dict:
+        """Strip detected injection patterns from a tool response."""
+        raw = json.dumps(result)
+        cleaned = self._injection_detector.strip_injections(raw)
+        return json.loads(cleaned)
 
     def _clean_tool(self, tool: dict) -> dict:
         """Remove internal spine metadata from a tool before sending to client."""

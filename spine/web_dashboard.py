@@ -170,6 +170,43 @@ class DashboardAPI:
             LIMIT 20
         """)
 
+    def request_log(self, limit: int = 30) -> list[dict]:
+        """Full request/response log with details."""
+        return self._query("""
+            SELECT timestamp, event_type, tool_name, server_name, details, session_id
+            FROM audit_log
+            WHERE event_type IN ('tool_call', 'tool_response')
+              AND tool_name IS NOT NULL
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, (limit,))
+
+    def injection_events(self) -> list[dict]:
+        """Prompt injection detection events."""
+        return self._query("""
+            SELECT timestamp, tool_name, server_name, details
+            FROM audit_log
+            WHERE event_type = 'validation_error'
+              AND details LIKE '%prompt_injection%'
+            ORDER BY timestamp DESC
+            LIMIT 20
+        """)
+
+    def latency_by_server(self) -> list[dict]:
+        """Average latency per server."""
+        return self._query("""
+            SELECT server_name,
+                   COUNT(*) as calls,
+                   ROUND(AVG(CAST(json_extract(details, '$.duration_ms') AS REAL)), 0) as avg_ms,
+                   ROUND(MAX(CAST(json_extract(details, '$.duration_ms') AS REAL)), 0) as max_ms
+            FROM audit_log
+            WHERE event_type = 'tool_call'
+              AND server_name IS NOT NULL
+              AND json_extract(details, '$.duration_ms') IS NOT NULL
+            GROUP BY server_name
+            ORDER BY avg_ms DESC
+        """)
+
 
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -506,6 +543,36 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 </div>
 
+<div class="bottom-panels">
+  <div class="panel">
+    <div class="panel-header">
+      <div class="dot" style="background:var(--yellow)"></div>
+      Server Latency
+    </div>
+    <div class="panel-body">
+      <table>
+        <thead><tr><th>Server</th><th>Calls</th><th>Avg</th><th>Max</th><th>Status</th></tr></thead>
+        <tbody id="latency-body"></tbody>
+      </table>
+      <div class="empty-state" id="latency-empty" style="display:none">No latency data</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header">
+      <div class="dot" style="background:var(--yellow)"></div>
+      Request Log
+    </div>
+    <div class="panel-body" style="max-height:300px;overflow-y:auto">
+      <table>
+        <thead><tr><th>Time</th><th>Type</th><th>Tool</th><th>Details</th></tr></thead>
+        <tbody id="requests-body"></tbody>
+      </table>
+      <div class="empty-state" id="requests-empty" style="display:none">No requests logged</div>
+    </div>
+  </div>
+</div>
+
 <script>
 const API = '/api';
 
@@ -530,12 +597,14 @@ function fmtEvent(e) {
 
 async function refresh() {
   try {
-    const [overview, calls, tools, security, sessions] = await Promise.all([
+    const [overview, calls, tools, security, sessions, latency, requests] = await Promise.all([
       fetch(API + '/overview').then(r => r.json()),
       fetch(API + '/calls').then(r => r.json()),
       fetch(API + '/tools').then(r => r.json()),
       fetch(API + '/security').then(r => r.json()),
       fetch(API + '/sessions').then(r => r.json()),
+      fetch(API + '/latency').then(r => r.json()),
+      fetch(API + '/requests').then(r => r.json()),
     ]);
 
     // Stats
@@ -643,6 +712,50 @@ async function refresh() {
       </tr>`).join('');
     }
 
+    // Latency by server
+    const latBody = document.getElementById('latency-body');
+    const latEmpty = document.getElementById('latency-empty');
+    if (latency.length === 0) {
+      latBody.innerHTML = '';
+      latEmpty.style.display = 'block';
+    } else {
+      latEmpty.style.display = 'none';
+      latBody.innerHTML = latency.map(l => {
+        const avg = l.avg_ms || 0;
+        const status = avg > 5000 ? 'red' : avg > 2000 ? 'yellow' : 'green';
+        return `<tr>
+          <td>${l.server_name || '—'}</td>
+          <td>${l.calls || 0}</td>
+          <td><span class="tag tag-${status}">${avg}ms</span></td>
+          <td style="color:var(--text-dim)">${l.max_ms || 0}ms</td>
+          <td><span class="tag tag-${status}">${avg > 5000 ? 'SLOW' : 'OK'}</span></td>
+        </tr>`;
+      }).join('');
+    }
+
+    // Request log
+    const reqBody = document.getElementById('requests-body');
+    const reqEmpty = document.getElementById('requests-empty');
+    if (requests.length === 0) {
+      reqBody.innerHTML = '';
+      reqEmpty.style.display = 'block';
+    } else {
+      reqEmpty.style.display = 'none';
+      reqBody.innerHTML = requests.map(r => {
+        const details = typeof r.details === 'string' ? JSON.parse(r.details) : (r.details || {});
+        const dur = details.duration_ms ? `${details.duration_ms}ms` : '';
+        const tokens = details.tokens_this_call ? `${details.tokens_this_call}tok` : '';
+        const info = [dur, tokens].filter(Boolean).join(' · ') || '—';
+        const typeTag = r.event_type === 'tool_call' ? 'purple' : 'green';
+        return `<tr>
+          <td>${fmtTime(r.timestamp)}</td>
+          <td><span class="tag tag-${typeTag}">${r.event_type === 'tool_call' ? 'REQ' : 'RES'}</span></td>
+          <td>${(r.tool_name || '—').substring(0, 20)}</td>
+          <td style="color:var(--text-dim)">${info}</td>
+        </tr>`;
+      }).join('');
+    }
+
     document.getElementById('refresh-status').textContent =
       'Updated ' + new Date().toLocaleTimeString();
   } catch (e) {
@@ -699,6 +812,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             data = self.api.hourly_activity()
         elif endpoint == 'servers':
             data = self.api.servers()
+        elif endpoint == 'requests':
+            data = self.api.request_log()
+        elif endpoint == 'injections':
+            data = self.api.injection_events()
+        elif endpoint == 'latency':
+            data = self.api.latency_by_server()
         else:
             self.send_error(404)
             return
