@@ -803,10 +803,23 @@ def doctor(config: str) -> None:
     t4.add_column(ratio=1)
     t4.add_column(ratio=2)
 
-    claude_paths = [
-        Path(os.environ.get("APPDATA", "")) / "Claude" / "claude_desktop_config.json",
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Packages" / "Claude_pzs8sxrjxfjjc" / "LocalCache" / "Roaming" / "Claude" / "claude_desktop_config.json",
-    ]
+    home = Path.home()
+    system = platform.system()
+    if system == "Darwin":
+        claude_paths = [
+            home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
+        ]
+    elif system == "Windows":
+        claude_paths = [
+            Path(os.environ.get("APPDATA", "")) / "Claude" / "claude_desktop_config.json",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Packages" / "Claude_pzs8sxrjxfjjc" / "LocalCache" / "Roaming" / "Claude" / "claude_desktop_config.json",
+        ]
+    else:
+        # Linux and other Unix
+        xdg_config = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
+        claude_paths = [
+            xdg_config / "Claude" / "claude_desktop_config.json",
+        ]
 
     found = False
     for cp in claude_paths:
@@ -831,10 +844,19 @@ def doctor(config: str) -> None:
         t4.add_row("Config", "[red]Not found[/red]")
 
     # Log file
-    log_paths = [
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Packages" / "Claude_pzs8sxrjxfjjc" / "LocalCache" / "Roaming" / "Claude" / "logs" / "mcp-server-spine.log",
-        Path(os.environ.get("APPDATA", "")) / "Claude" / "logs" / "mcp-server-spine.log",
-    ]
+    if system == "Darwin":
+        log_paths = [
+            home / "Library" / "Logs" / "Claude" / "mcp-server-spine.log",
+        ]
+    elif system == "Windows":
+        log_paths = [
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Packages" / "Claude_pzs8sxrjxfjjc" / "LocalCache" / "Roaming" / "Claude" / "logs" / "mcp-server-spine.log",
+            Path(os.environ.get("APPDATA", "")) / "Claude" / "logs" / "mcp-server-spine.log",
+        ]
+    else:
+        log_paths = [
+            xdg_config / "Claude" / "logs" / "mcp-server-spine.log",
+        ]
     for lp in log_paths:
         if lp.exists():
             t4.add_row("Log file", f"[green]{lp}[/green]")

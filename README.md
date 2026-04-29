@@ -486,7 +486,7 @@ mcp-spine/
 pytest tests/ -v
 ```
 
-190+ tests. CI on Windows + Linux, Python 3.11/3.12/3.13.
+190+ tests. CI on Windows, macOS, and Linux, Python 3.11/3.12/3.13.
 
 ## License
 
